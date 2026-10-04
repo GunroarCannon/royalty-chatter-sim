@@ -1,0 +1,23 @@
+{
+  "name": "royal-banter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A lighthearted medieval strategy game where every ruler remembers what you did. Memory on Walrus.",
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c yellow,cyan \"node --watch-path=server --watch-path=shared server/index.js\" \"vite\"",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "test:memory": "node scripts/test-memory.js"
+  },
+  "dependencies": {
+    "@mysten-incubation/memwal": "^0.1.8",
+    "d3-delaunay": "^6.0.4",
+    "dotenv": "^18.0.5",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5",
+    "vite": "^8.3.2"
+  }
+}

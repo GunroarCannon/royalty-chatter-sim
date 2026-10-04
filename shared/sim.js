@@ -1,0 +1,398 @@
+// The season tick, wars, promises, deaths and succession. Pure state transforms with a seeded RNG,
+// so the same code can run on a server once multiplayer arrives.
+import { RNG, clamp } from './rng.js';
+import {
+  player, playerRealm, provincesOf, record, addMod, heirOf, refreshRoles, maxLevies, income, fullName, shortName, ageOf,
+  makeChar, atWar, allied, neighborsOfRealm, council, COUNCIL, opinionOf, dateStr, roleLabel, SEASONS, TRAITS,
+  withPlayer, forHuman, isHumanRealm, humanPid,
+} from './world.js';
+import { houseName, randomCulture, EPITHETS } from './names.js';
+import { DIFFICULTY } from './world.js';
+import { PRESETS } from './cultures.js';
+import { drawEvents, queueEvent, autoResolveStale } from './events.js';
+
+export const turnRng = (state, label = '') => new RNG(`turn:${state.seed}:${state.campaign}:${state.turn}:${label}`);
+
+/**
+ * One season. The world phase (time, NPC realms, births and deaths, NPC wars) runs once; the player
+ * phase (treasury, court, events, promises, wars against you) runs for each human. In single player
+ * the one human is simply the mounted state; in a shared world each player's view is mounted in turn.
+ */
+export function endSeason(state, map) {
+  const rng = turnRng(state, 'season');
+  const humans = state.players ? Object.keys(state.players).filter(pid => !state.players[pid].left && state.realms[state.players[pid].realm] && state.realms[state.players[pid].realm].alive) : [null];
+  const begin = () => { state.flags.lastTurnEvents = []; };
+  if (state.players) for (const pid of humans) withPlayer(state, pid, begin); else begin();
+  withPlayer(state, null, () => {
+    state.turn++;
+    state.season = (state.season + 1) % 4;
+    if (state.season === 0) state.year++;
+    worldPhase(state, map, rng);
+  });
+  for (const pid of humans) {
+    const run = () => playerPhase(state, map, state.players ? turnRng(state, 'p:' + pid) : rng);
+    if (pid) withPlayer(state, pid, run); else run();
+  }
+}
+
+function worldPhase(state, map, rng) {
+  for (const r of state.realms) if (r.alive && !isHumanRealm(state, r.id)) r.levies = Math.min(maxLevies(state, r.id), Math.round(r.levies + maxLevies(state, r.id) * 0.14));
+  lifeAndDeath(state, map, rng);
+  wars(state, map, rng);
+  aiWars(state, map, rng);
+}
+
+function playerPhase(state, map, rng) {
+  if (state.gameOver) return;
+  if (state.players) autoResolveStale(state, map);
+  const pr = playerRealm(state);
+  state.gold += income(state);
+  state.prestige += 1;
+  pr.levies = Math.min(maxLevies(state, pr.id), Math.round(pr.levies + maxLevies(state, pr.id) * 0.14));
+  state.audiences = Math.min(3, state.audiences + 1);
+  // opinion modifiers wear off; promises to the dead are void
+  for (const c of Object.values(state.chars)) {
+    if (!c.alive) continue;
+    c.mods = c.mods.filter(m => (m.left == null ? true : --m.left > 0));
+  }
+  for (const p of state.promises) if (p.status === 'open' && state.chars[p.to] && !state.chars[p.to].alive) p.status = 'void';
+  fillCouncil(state, rng);
+  aiDiplomacy(state, map, rng);
+  promiseDeadlines(state);
+  epithets(state);
+  drawEvents(state, map, rng);
+  if (state.gold < -100 && !state.flags.debtWarned) { state.flags.debtWarned = true; queueEvent(state, 'bankrupt', {}); }
+  if (state.inbox) for (const t of state.flags.lastTurnEvents || []) pushInbox(state, t.icon, t.text);
+}
+
+/** A notification for the mounted player (shown as a toast when their client next syncs). */
+export function pushInbox(state, icon, text) {
+  if (!state.inbox) return;
+  state.inbox.push({ id: (state.inbox.length ? state.inbox[state.inbox.length - 1].id : 0) + 1, icon, text, turn: state.turn });
+  if (state.inbox.length > 40) state.inbox.splice(0, state.inbox.length - 40);
+}
+/** Tell the human ruling realmId something (no-op for AI realms, or if it is the mounted player). */
+export function notifyRealm(state, realmId, icon, text) {
+  if (!state.players) return;
+  const pid = humanPid(state, realmId);
+  if (pid && pid !== state.pid) withPlayer(state, pid, () => pushInbox(state, icon, text));
+}
+
+// ---------------------------------------------------------------- life & death
+
+function deathChance(age) {
+  // per season (≈ annual / 4); steep after 55 so a casual session usually sees a succession
+  if (age < 16) return 0.001; if (age < 40) return 0.0015; if (age < 52) return 0.004;
+  if (age < 62) return 0.016; if (age < 72) return 0.032; return 0.06;
+}
+
+function lifeAndDeath(state, map, rng) {
+  for (const c of Object.values(state.chars)) {
+    if (!c.alive) continue;
+    const a = ageOf(state, c);
+    let p = deathChance(a);
+    if (c.imprisoned) p *= 2;
+    if (rng.chance(p)) kill(state, map, c, rng.pick(a > 60 ? ['old age', 'a fever', 'a bad fall', 'a surfeit of eels'] : ['a fever', 'a hunting accident', 'a duel', 'a surfeit of eels', 'mysterious circumstances']));
+    if (state.gameOver) return;
+  }
+  // births for rulers with living consorts
+  for (const r of state.realms) {
+    if (!r.alive) continue;
+    const ruler = state.chars[r.ruler], sp = ruler && ruler.spouse && state.chars[ruler.spouse];
+    if (!sp || !sp.alive) continue;
+    const mother = ruler.sex === 'f' ? ruler : sp;
+    if (ageOf(state, mother) > 44 || ageOf(state, mother) < 17) continue;
+    if (ruler.children.filter(id => state.chars[id].alive).length >= 5) continue;
+    if (!rng.chance(isHumanRealm(state, r.id) ? 0.09 : 0.05)) continue;
+    const kid = makeChar(state, rng, { realm: r.id, heritage: r.heritage, house: ruler.house, role: 'child', age: 0, parents: [ruler.id, sp.id] });
+    ruler.children.push(kid.id); sp.children.push(kid.id);
+    forHuman(state, r.id, () => {
+      record(state, `${sp.name} gave birth to a ${kid.sex === 'm' ? 'son' : 'daughter'}, ${kid.name}.`, { kind: 'birth', chars: [sp.id, kid.id] });
+      queueEvent(state, 'birth', { a: sp.id, b: kid.id });
+    });
+  }
+  refreshRoles(state);
+}
+
+export function kill(state, map, c, cause) {
+  const r = state.realms[c.realm];
+  if (state.players && r) { const hp = humanPid(state, r.id); if (hp && hp !== state.pid) return withPlayer(state, hp, () => kill(state, map, c, cause)); }
+  c.alive = false; c.died = state.year; c.cause = cause;
+  const isPlayerRuler = r && r.id === state.playerRealm && r.ruler === c.id;
+  if (c.spouse && state.chars[c.spouse]) state.chars[c.spouse].spouse = null;
+  // promises owed to the dead are void
+  for (const p of state.promises) if (p.status === 'open' && p.to === c.id) p.status = 'void';
+  if (r && r.ruler === c.id) succession(state, map, r, c, cause, isPlayerRuler);
+  else if (r && r.id === state.playerRealm) {
+    record(state, `${c.name} (${roleLabel(state, c)}) died of ${cause}.`, { kind: 'death', chars: [c.id] });
+    (state.flags.lastTurnEvents || (state.flags.lastTurnEvents = [])).push({ icon: '✝', text: `${c.name} has died of ${cause}.` });
+  }
+}
+
+function consorts(state, dead, heir) {
+  const widow = dead.spouse && state.chars[dead.spouse];
+  if (widow && widow.alive && widow.role === 'spouse') widow.role = 'courtier';
+  const sp = heir.spouse && state.chars[heir.spouse];
+  if (sp && sp.alive) sp.role = 'spouse';
+}
+
+function succession(state, map, realm, dead, cause, isPlayer) {
+  let heir = heirOf(state, dead);
+  let cousin = false;
+  if (!heir && isPlayer) {
+    // casual-friendly: a distant cousin of the dynasty turns up to claim the throne
+    const rng = new RNG(`cousin:${state.seed}:${state.turn}`);
+    heir = makeChar(state, rng, { realm: realm.id, heritage: realm.heritage, house: state.dynasty, role: 'child', age: rng.int(19, 38) });
+    cousin = true;
+  }
+  if (isPlayer) {
+    const reign = state.reigns[state.reigns.length - 1];
+    reign.to = state.year; reign.stats = Object.assign({}, state.stats); reign.rep = reputation(state.stats);
+    reign.name = fullName(state, dead);
+    record(state, `${fullName(state, dead)} died of ${cause} after ${state.year - reign.from} years on the throne. History remembers them as "${reign.rep}".`,
+      { kind: 'death', chars: [dead.id], world: `In the realm of ${realm.name}, ${fullName(state, dead)} of House ${state.dynasty} died of ${cause}. They were called "${reign.rep}": ${state.stats.promisesBroken} promises broken, ${state.stats.wars} wars started.` });
+    realm.ruler = heir.id; heir.role = 'ruler';
+    consorts(state, dead, heir);
+    heir.regnal = 1 + state.reigns.filter(x => state.chars[x.ruler] && state.chars[x.ruler].name === heir.name).length;
+    if (dead.regnal == null) dead.regnal = 1;
+    state.reigns.push({ ruler: heir.id, name: fullName(state, heir), from: state.year, to: null });
+    // the court's feelings pass down, diluted; grudges with `inherit` stay as a lesser echo
+    for (const c of Object.values(state.chars)) {
+      if (!c.alive || c.id === heir.id) continue;
+      c.opinion = Math.round(c.opinion * 0.5);
+      c.mods = c.mods.filter(m => m.inherit).map(m => ({ ...m, label: m.label + ' (predecessor)', value: Math.round(m.value / 2), inherit: false }));
+    }
+    for (const k of Object.keys(state.stats)) state.stats[k] = 0;
+    state.audiences = Math.max(state.audiences, 2);
+    record(state, `${fullName(state, heir)}${cousin ? ', a distant cousin nobody had heard of,' : ''} inherits the throne of ${realm.name}.`, { kind: 'reign', chars: [heir.id, dead.id] });
+    queueEvent(state, 'succession', { a: heir.id, b: dead.id, cousin });
+  } else {
+    if (heir) { realm.ruler = heir.id; heir.role = 'ruler'; consorts(state, dead, heir); }
+    else {
+      const rng = new RNG(`succ:${state.seed}:${state.turn}:${realm.id}`);
+      const nh = houseName(rng, realm.heritage);
+      const nr = makeChar(state, rng, { realm: realm.id, heritage: realm.heritage, house: nh, role: 'ruler', age: rng.int(22, 50) });
+      realm.ruler = nr.id; realm.house = nh;
+    }
+    const nr = state.chars[realm.ruler];
+    if (map && neighborsOfRealm(state, map, state.playerRealm).includes(realm.id) || allied(state, realm.id, state.playerRealm))
+      state.flags.lastTurnEvents.push({ icon: '👑', text: `${dead.name} of ${realm.name} died of ${cause}. ${nr.name} now rules.` });
+    record(state, `${fullName(state, dead)} of ${realm.name} died of ${cause}; ${nr.name} succeeds.`, { kind: 'death', chars: [dead.id, nr.id], mem: false });
+  }
+  refreshRoles(state);
+}
+
+function fillCouncil(state, rng) {
+  if (!playerRealm(state)) return;
+  const have = council(state), r = playerRealm(state);
+  for (const role of COUNCIL) {
+    if (have[role]) continue;
+    const her = rng.chance(0.75) ? r.heritage : randomCulture(state, rng);
+    const c = makeChar(state, rng, { realm: r.id, heritage: her, house: houseName(rng, her), role, age: rng.int(22, 50), court: true });
+    c.opinion = c.op0 = rng.int(0, 20);
+    record(state, `${c.name} of House ${c.house} was appointed ${roleLabel(state, c)}.`, { kind: 'court', chars: [c.id] });
+    state.flags.lastTurnEvents.push({ icon: '📜', text: `${c.name} joins your council as ${role}.` });
+  }
+}
+
+// ---------------------------------------------------------------- wars
+
+export function declareWar(state, map, attacker, defender, why) {
+  if (atWar(state, attacker, defender)) return null;
+  const capA = map.provinces[state.realms[attacker].capital].center;
+  const border = provincesOf(state, defender).filter(p => map.provinces[p].neighbors.some(q => state.owner[q] === attacker));
+  const pool = border.length ? border : provincesOf(state, defender);
+  pool.sort((a, b) => dist(map.provinces[a].center, capA) - dist(map.provinces[b].center, capA));
+  const war = { id: 'w' + state.turn + '_' + attacker + '_' + defender, attacker, defender, target: pool[0], score: 0, started: state.turn, why: why || 'conquest' };
+  state.wars.push(war);
+  state.alliances = state.alliances.filter(a => !(a.includes(attacker) && a.includes(defender)));
+  return war;
+}
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+export function battle(state, war, playerChoice, rng) {
+  // returns { winner, text, swing }
+  const A = state.realms[war.attacker], D = state.realms[war.defender];
+  const mar = r => (r.id === state.playerRealm ? (council(state).marshal || { stats: { mar: 8 } }).stats.mar : state.chars[r.ruler].stats.mar);
+  let pa = A.levies * (1 + mar(A) / 30) * rng.range(0.75, 1.25);
+  let pd = D.levies * (1 + mar(D) / 30) * rng.range(0.75, 1.25) * 1.1;
+  const playerIsA = war.attacker === state.playerRealm;
+  if (playerChoice) {
+    const boost = { charge: rng.range(0.7, 1.5), hold: rng.range(0.95, 1.2), flank: mar(playerIsA ? A : D) >= 11 ? rng.range(1.1, 1.4) : rng.range(0.6, 1.0) }[playerChoice] || 1;
+    if (playerIsA) pa *= boost; else pd *= boost;
+  }
+  const aWins = pa >= pd;
+  const ratio = aWins ? pa / Math.max(1, pd) : pd / Math.max(1, pa);
+  const swing = Math.round(clamp(15 + ratio * 10, 18, 45));
+  war.score = clamp(war.score + (aWins ? swing : -swing), -100, 100);
+  const lw = aWins ? D : A, ww = aWins ? A : D;
+  const lossL = Math.round(lw.levies * rng.range(0.2, 0.35)), lossW = Math.round(ww.levies * rng.range(0.06, 0.14));
+  lw.levies -= lossL; ww.levies -= lossW;
+  (war.log || (war.log = [])).push({ t: state.turn, y: dateStr(state), w: ww.id, l: lw.id, lossW, lossL, swing, choice: playerChoice || null, score: war.score });
+  if (war.log.length > 10) war.log.shift();
+  return { winner: ww.id, loser: lw.id, swing, lossL, lossW, text: `${ww.name} defeats ${lw.name}'s host (${lossL} slain against ${lossW}).` };
+}
+
+export function endWar(state, map, war, outcome) {
+  // outcome: 'attacker' | 'defender' | 'white'
+  state.wars = state.wars.filter(w => w !== war);
+  const A = state.realms[war.attacker], D = state.realms[war.defender];
+  const prov = map.provinces[war.target];
+  let text;
+  if (outcome === 'attacker') {
+    state.owner[war.target] = A.id;
+    text = `${A.name} won the war against ${D.name} and took ${prov.name}.`;
+    if (D.capital === war.target) { const left = provincesOf(state, D.id); if (left.length) D.capital = left[0]; }
+    if (!provincesOf(state, D.id).length) {
+      D.alive = false;
+      text += ` ${D.name} is no more.`;
+    }
+    forHuman(state, A.id, () => state.stats.provincesWon++);
+    forHuman(state, D.id, () => { state.stats.provincesLost++; if (!D.alive) state.gameOver = { reason: 'conquered', year: state.year }; });
+  } else if (outcome === 'defender') {
+    text = `${D.name} repelled ${A.name}. The war is over.`;
+    forHuman(state, A.id, () => { state.gold -= 40; });
+    forHuman(state, D.id, () => { state.gold += 40; state.prestige += 15; });
+  } else text = `${A.name} and ${D.name} agreed to a white peace.`;
+  state.flags.mapDirty = true;
+  for (const side of [A.id, D.id]) forHuman(state, side, () => {
+    record(state, text, { kind: 'war', chars: [A.ruler, D.ruler], world: text });
+    (state.flags.lastTurnEvents || (state.flags.lastTurnEvents = [])).push({ icon: '🏳', text });
+    state.flags.mapDirty = true;
+  });
+  return text;
+}
+
+function wars(state, map, rng) {
+  for (const war of state.wars.slice()) {
+    const A = state.realms[war.attacker], D = state.realms[war.defender];
+    if (!A.alive || !D.alive) { state.wars = state.wars.filter(w => w !== war); continue; }
+    if (isHumanRealm(state, war.attacker) || isHumanRealm(state, war.defender)) {
+      for (const [mine, theirs] of [[war.attacker, war.defender], [war.defender, war.attacker]]) {
+        forHuman(state, mine, () => { if (!state.queue.some(q => q.id === 'battle' && q.cast.war === war.id)) queueEvent(state, 'battle', { war: war.id, realm: theirs }); });
+      }
+      continue;
+    }
+    battle(state, war, null, rng);
+    if (war.score >= 100) endWar(state, map, war, 'attacker');
+    else if (war.score <= -100) endWar(state, map, war, 'defender');
+    else if (state.turn - war.started > 10) endWar(state, map, war, 'white');
+  }
+}
+
+function aiWars(state, map, rng) {
+  // NPC realms fight each other; wars on humans are rolled in each player's own phase
+  for (const r of state.realms) {
+    if (!r.alive || isHumanRealm(state, r.id)) continue;
+    if (state.wars.some(w => w.attacker === r.id || w.defender === r.id)) continue;
+    if (!rng.chance(0.03 * r.aggression * aggrMult(state))) continue;
+    const targets = neighborsOfRealm(state, map, r.id).filter(t => !allied(state, r.id, t) && !isHumanRealm(state, t)).map(t => [t, r.levies / Math.max(50, state.realms[t].levies)]).filter(([, w]) => w > 0.8);
+    if (targets.length) declareWar(state, map, r.id, rng.weighted(targets));
+  }
+}
+
+function aiDiplomacy(state, map, rng) {
+  // neighbours of the mounted player decide whether to attack them
+  for (const t0 of neighborsOfRealm(state, map, state.playerRealm)) {
+    const r = state.realms[t0];
+    if (!r.alive || isHumanRealm(state, r.id)) continue;
+    if (state.wars.some(w => w.attacker === r.id || w.defender === r.id)) continue;
+    if (!rng.chance(0.012 * r.aggression * aggrMult(state))) continue;
+    const ruler = state.chars[r.ruler];
+    if (allied(state, r.id, state.playerRealm)) continue;
+    const T = playerRealm(state);
+    let w = r.levies / Math.max(50, T.levies);
+    const o = opinionOf(state, ruler).total;
+    w *= o < -30 ? 3 : o < 0 ? 1.3 : o > 30 ? 0.1 : 0.6;
+    if (w < 0.8) continue;
+    const t = state.playerRealm;
+    const war = declareWar(state, map, r.id, t);
+    if (!war) continue;
+    {
+      record(state, `${fullName(state, ruler)} of ${r.name} declared war on us, demanding ${map.provinces[war.target].name}.`, { kind: 'war', chars: [ruler.id] });
+      queueEvent(state, 'war_declared', { a: ruler.id, realm: r.id, war: war.id });
+    }
+  }
+  // occasional alliance offers from neighbours who like you
+  const ns = neighborsOfRealm(state, map, state.playerRealm).filter(t => !allied(state, t, state.playerRealm) && !atWar(state, t, state.playerRealm) && !isHumanRealm(state, t));
+  for (const t of ns) {
+    const ruler = state.chars[state.realms[t].ruler];
+    if (opinionOf(state, ruler).total > 35 && rng.chance(0.08)) { queueEvent(state, 'alliance_offer', { a: ruler.id, realm: t }); break; }
+  }
+}
+
+// ---------------------------------------------------------------- promises
+
+export function makePromise(state, o) {
+  const p = {
+    id: 'p' + state.turn + '_' + Math.floor(Math.random() * 1e6), to: o.to, by: player(state).id, text: o.text, kind: o.kind || 'vague',
+    amount: o.amount || 0, target: o.target != null ? o.target : null, made: state.turn, due: state.turn + clamp(o.seasons || 4, 1, 16), status: 'open',
+  };
+  state.promises.push(p);
+  state.stats.promisesMade++;
+  const c = state.chars[p.to];
+  addMod(c, 'Promised something', 5, p.due - state.turn + 1, 'promise:' + p.id);
+  record(state, `PROMISE: ${fullName(state, player(state))} promised ${c.name}: "${p.text}" (due by ${SEASONS[(state.season + (p.due - state.turn)) % 4]} ${state.year + Math.floor((state.season + p.due - state.turn) / 4)}).`, { kind: 'promise', chars: [c.id] });
+  return p;
+}
+
+export function keepPromise(state, p, how) {
+  p.status = 'kept';
+  state.stats.promisesKept++;
+  const c = state.chars[p.to];
+  c.mods = c.mods.filter(m => m.key !== 'promise:' + p.id);
+  addMod(c, 'Kept a promise', 20, 16, 'kept:' + p.id);
+  record(state, `PROMISE KEPT: ${fullName(state, player(state))} kept their word to ${c.name}: "${p.text}"${how ? ' — ' + how : ''}.`, { kind: 'promise-kept', chars: [c.id] });
+}
+
+export function breakPromise(state, p) {
+  p.status = 'broken';
+  state.stats.promisesBroken++;
+  const c = state.chars[p.to];
+  c.mods = c.mods.filter(m => m.key !== 'promise:' + p.id);
+  const hurt = c.traits.includes('honest') || c.traits.includes('paranoid') || c.traits.includes('wrathful') ? -45 : -30;
+  c.mods.push({ key: 'broken:' + p.id, label: 'Broke a promise', value: hurt, left: 40, inherit: true });
+  // the whole court hears about it
+  for (const o of Object.values(state.chars)) if (o.alive && o.court && o.id !== c.id && o.realm === state.playerRealm) addMod(o, 'Known oathbreaker', -5 * Math.min(3, state.stats.promisesBroken), 12, 'oathbreaker');
+  record(state, `PROMISE BROKEN: ${fullName(state, player(state))} broke their promise to ${c.name}: "${p.text}". ${c.name} will not forget.`,
+    { kind: 'promise-broken', chars: [c.id], world: `${fullName(state, player(state))} of House ${state.dynasty} broke a promise to ${c.name}: "${p.text}".` });
+}
+
+function promiseDeadlines(state) {
+  for (const p of state.promises) {
+    if (p.status !== 'open' || state.turn < p.due) continue;
+    if (p.kind === 'war' && p.target != null && (atWar(state, state.playerRealm, p.target) || state.flags['warWith' + p.target] >= p.made)) { keepPromise(state, p, 'war was declared'); continue; }
+    if (state.queue.some(q => q.cast && q.cast.promise === p.id)) continue;
+    queueEvent(state, 'promise_due', { a: p.to, promise: p.id });
+  }
+}
+
+// ---------------------------------------------------------------- reputation & epithets
+
+function epithets(state) {
+  const ruler = player(state);
+  if (ruler.epithet) return;
+  const s = state.stats;
+  const pick = s.promisesBroken >= 3 ? 'liar' : s.cheese >= 2 ? 'cheese' : s.gifts >= 6 ? 'generous' : s.battlesWon >= 4 ? 'warlike' : s.promisesKept >= 4 ? 'honest' : null;
+  if (pick) {
+    ruler.epithet = pick === 'cheese' ? foodOf(state).epithet : EPITHETS[pick];
+    record(state, `The people have begun calling their ruler "${ruler.name} ${ruler.epithet}".`, { kind: 'epithet', chars: [ruler.id], world: `In ${playerRealm(state).name}, the ruler is now known as ${ruler.name} ${ruler.epithet}.` });
+    state.flags.lastTurnEvents.push({ icon: '📣', text: `You are now known as ${ruler.name} ${ruler.epithet}!` });
+  }
+}
+
+export const aggrMult = state => ((state.settings && DIFFICULTY[state.settings.difficulty]) || DIFFICULTY.normal).aggr;
+
+/** The realm's prized foodstuff, for the running joke (cheese in the silly presets). */
+export function foodOf(state) {
+  const p = PRESETS[state.preset] || PRESETS.world;
+  return p.food || { name: 'cheese', Name: 'Cheese', epithet: 'the Cheesemonger', insult: 'curd-brained fool' };
+}
+
+export function reputation(s) {
+  const competence = s.provincesWon * 2 + s.battlesWon + s.promisesKept - s.provincesLost * 2 - s.battlesLost;
+  const chaos = s.wars * 1.5 + s.promisesBroken * 2 + s.insults + s.imprisoned * 1.5 + s.cheese * 2 - s.gifts * 0.3;
+  const adj = competence <= -3 ? 'Hopelessly incompetent' : competence <= 0 ? 'Mostly harmless' : competence <= 4 ? 'Surprisingly competent' : competence <= 9 ? 'Remarkably capable' : 'Legendary';
+  const noun = chaos <= 0 ? 'saint' : chaos <= 3 ? 'bureaucrat' : chaos <= 7 ? 'rascal' : chaos <= 12 ? 'disaster' : 'catastrophe';
+  return `${adj} ${noun}`;
+}
