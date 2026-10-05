@@ -102,3 +102,6 @@ export function opinionBadge(v) {
   const cls = v >= 25 ? 'good' : v <= -25 ? 'bad' : 'meh';
   return h('span.op.' + cls, null, (v > 0 ? '+' : '') + v);
 }
+
+/** Three bouncing ink dots: someone is thinking. */
+export const typingDots = () => h('span.dots', { 'aria-label': 'thinking' }, h('i'), h('i'), h('i'));

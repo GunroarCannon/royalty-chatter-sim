@@ -2,9 +2,12 @@
 // surfaced from Walrus shown as little notes, so players can SEE what the character remembers.
 import { audienceContext, disposition, applyExchange, finishAudience } from '../../shared/actions.js';
 import { opinionOf, roleLabel, fullName, TRAITS, player } from '../../shared/world.js';
-import { liveActor, moodExpr } from '../portraits.js';
+import { liveActor, moodExpr, stillURL } from '../portraits.js';
 import { api } from '../api.js';
-import { h, esc, toast, opinionBadge, tipHTML } from './dom.js';
+import { h, esc, toast, opinionBadge, tipHTML, typingDots } from './dom.js';
+import { sfx } from '../audio.js';
+
+export const sexMark = c => h('span.sex.' + (c.sex === 'f' ? 'f' : 'm'), { 'data-tip': c.sex === 'f' ? 'Woman' : 'Man' }, c.sex === 'f' ? '♀' : '♂');
 import { draggable } from './drag.js';
 
 const CHIP_TIPS = { Apologise: 'Soften a grudge. Not everyone forgives.', Flatter: 'Most people like it. The proud love it.', 'Ask for gold': 'Some will give, some lend, some refuse.', 'Make a promise': 'It will be written down, with a deadline.', Threaten: 'Risky. Some will storm out.', 'Ask their mind': 'Hear what troubles them.', Gossip: 'Spymasters, priests and jesters know things.' };
@@ -23,7 +26,7 @@ export function openAudience(game, c, { reason, free, onClose }) {
   const mp = game.mp; // shared world: the server rolls fate and applies effects
   const op0 = opinionOf(s, c).total;
   const live = liveActor(s, c, 270, moodExpr(op0));
-  const aud = { id: null, delta: 0, used: {}, promises: 0, fate: null, left: 0, over: false };
+  const aud = { id: null, delta: 0, used: {}, promises: 0, fate: null, left: 0, over: false, said: 0 };
   const seed = `${s.seed}:${s.turn}:${c.id}:${Date.now()}`;
   aud.fate = mp ? null : disposition(s, c, seed);
   const ctx = mp ? null : audienceContext(s, game.map, c);
@@ -37,6 +40,13 @@ export function openAudience(game, c, { reason, free, onClose }) {
   const opEl = h('span');
   const chips = h('div.chips', null, CHIPS.map(([label, text]) => h('span.chip', { 'data-tip': tipHTML(label.slice(2).trim(), CHIP_TIPS[label.slice(2).trim()] || ''), onclick: () => { input.value = text; input.focus(); input.setSelectionRange(text.length, text.length); } }, label)));
   const speech = h('div.speech');
+  const say = h('div.say', null, input, sendBtn);
+  // while they think, the input is locked: say so, with dots, so nobody wonders why they cannot type
+  const waiting = (on, what) => {
+    say.classList.toggle('waiting', on);
+    input.placeholder = on ? (what || `${c.name} is thinking…`) : `Speak to ${c.name}…`;
+  };
+  const addTyping = () => { const el = h('div.line.them.typing', null, h('span.who', null, c.name + ':'), typingDots()); log.append(el); log.scrollTop = log.scrollHeight; return el; };
 
   const addLine = (who, text, cls = '') => {
     const el = h('div.line.' + (who === 'ruler' ? 'ruler' : who === 'sys' ? 'sys' : 'them') + (cls ? '.' + cls : ''), null,
@@ -60,6 +70,7 @@ export function openAudience(game, c, { reason, free, onClose }) {
     addLine('sys', angry ? `${c.name} storms out!` : `${c.name} takes their leave.`, angry ? 'bad' : '');
     live.actor.act('look away');
     back.querySelector('.aud-portrait').append(h('div.stamp.' + (angry ? 'lose' : 'meh'), null, angry ? 'Stormed out' : 'Left'));
+    sfx(angry ? 'cut' : 'drop');
   };
 
   const perform = r => {
@@ -77,31 +88,28 @@ export function openAudience(game, c, { reason, free, onClose }) {
   };
 
   let ended = false;
-  const end = async () => {
+  const end = () => {
     if (ended) return; ended = true;
     input.disabled = true; sendBtn.disabled = true;
     if (!mp) finishAudience(s, game.map, c, aud);
-    if (aud.id) {
-      const t = addLine('sys', `${c.name} will remember this conversation…`);
-      try {
-        const r = await api.audienceEnd(aud.id);
-        if (r.notes && r.notes.length) { t.textContent = `Written to Walrus Memory: ${r.notes.join(' ')}`; await new Promise(res => setTimeout(res, 1600)); }
-      } catch {}
-    }
     live.stop(); back.remove();
-    onClose && onClose();
+    const done = () => onClose && onClose();
+    if (aud.id && aud.said) memoryNote(game, c, api.audienceEnd(aud.id), done);
+    else { if (aud.id) api.audienceEnd(aud.id).catch(() => {}); done(); }
   };
 
   const send = async () => {
     const msg = input.value.trim();
     if (!msg || aud.over || !aud.id) return;
     input.value = ''; input.disabled = true; sendBtn.disabled = true;
-    addLine('ruler', msg);
-    const typing = addLine('them', '…', 'typing');
+    const mine = addLine('ruler', msg);
+    const typing = addTyping();
+    waiting(true);
     live.actor.setExpr('thinking');
     try {
       const r = await api.audienceSay(aud.id, msg);
       typing.remove();
+      aud.said++;
       for (const m of r.stirred || []) addMem(m, true);
       addLine('them', r.reply.line);
       perform(r.reply);
@@ -112,49 +120,85 @@ export function openAudience(game, c, { reason, free, onClose }) {
       if (r.left <= 0 || r.reply.ends_audience) aud.over = true;
     } catch (e) {
       typing.remove();
-      addLine('sys', e.message, 'bad');
-      if (e.data && e.data.over) aud.over = true;
+      console.warn('audience:', e.message);
+      if (e.data && e.data.over) { aud.over = true; addLine('sys', e.message, 'bad'); }
+      else {
+        // nothing was said: put the words back so one tap sends them again
+        mine.remove();
+        input.value = msg;
+        addLine('sys', e.status === 429 ? e.message : `${c.name} did not quite catch that. Press Speak to say it again.`, 'bad');
+      }
     }
+    waiting(false);
     updateLeft();
     if (!aud.over) { input.disabled = false; sendBtn.disabled = false; input.focus(); }
-    else { chips.style.display = 'none'; sendBtn.textContent = 'Speak'; }
+    else { chips.style.display = 'none'; sendBtn.textContent = 'Speak'; endBtn.classList.add('pulse'); }
   };
   sendBtn.onclick = send;
   input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); if (e.key === 'Escape') end(); });
 
-  const back = h('div.modal-back', null, h('div.panel.audience', null,
-    h('div.titlebar', null, `Audience with ${fullName(s, c)}`, h('button.x', { onclick: end, 'data-tip': tipHTML('End the audience', 'They will remember what was said.') }, '✕')),
+  const endBtn = h('button.btn.small', { onclick: end, 'data-tip': tipHTML('End audience', 'Leave now. What was said is written to Walrus Memory.') }, 'End audience');
+  const back = h('div.modal-back.aud-back', null, h('div.panel.audience', null,
+    h('div.titlebar', null, h('span.tb-text', null, `Audience with ${fullName(s, c)}`), h('button.x', { onclick: end, 'data-tip': tipHTML('End the audience', 'They will remember what was said.') }, '✕')),
     h('div.aud-body', null,
       h('div.aud-left', null,
         h('div.aud-portrait', null, live.el, speech),
-        h('div', null, h('div.sc', { style: { fontSize: '18px' } }, fullName(s, c)), h('div.muted', { style: { fontSize: '13px' } }, roleLabel(s, c)), opEl,
+        h('div.aud-info', null, h('div.sc', { style: { fontSize: '18px' } }, fullName(s, c), ' ', sexMark(c)), h('div.muted', { style: { fontSize: '13px' } }, roleLabel(s, c)), opEl,
           h('div.traits', null, c.traits.map(t => h('span.trait', { 'data-tip': esc(TRAITS[t].persona) }, TRAITS[t].icon + ' ' + TRAITS[t].label)))),
-        h('div', { style: { overflowY: 'auto', flex: 1 } }, h('div.mem-h', null, 'What they remember'), mems)),
-      h('div.aud-right', null, log, chips,
-        h('div.say', null, input, sendBtn),
-        h('div.aud-foot', null, leftEl, h('button.btn.small', { onclick: end, 'data-tip': tipHTML('End audience', 'Leave now. What was said is written to Walrus Memory.') }, 'End audience')))),
+        h('div.aud-mems', null, h('div.mem-h', null, 'What they remember'), mems)),
+      h('div.aud-right', null, log, chips, say,
+        h('div.aud-foot', null, leftEl, endBtn))),
   ));
   document.body.append(back);
   draggable(back.firstChild, { handle: back.firstChild.querySelector('.titlebar') });
   updateOp();
-  const opening = addLine('them', '…', 'typing');
+  const opening = addTyping();
+  waiting(true, `${c.name} is recalling what they know of you…`);
   leftEl.textContent = 'Recalling memories from Walrus…';
+  sfx('drop');
 
   api.audienceStart(ctx, aud.fate, reason, mp ? { worldId: mp.id, charId: c.id, free: !!free } : null).then(r => {
     if (r.opinion != null) { liveOp = r.opinion; updateOp(); }
     aud.id = r.id; aud.left = r.limit;
     opening.remove();
+    waiting(false);
     if (!r.memories.length) mems.append(h('div.muted', { style: { fontSize: '13px' } }, 'Nothing yet. Make an impression.'));
     r.memories.forEach(m => addMem(m, false));
     addLine('them', r.reply.line);
     perform(r.reply);
-    if (r.reply.ends_audience) { walkOut(); aud.over = true; chips.style.display = 'none'; updateLeft(); return; }
+    if (r.reply.ends_audience) { walkOut(); aud.over = true; chips.style.display = 'none'; endBtn.classList.add('pulse'); updateLeft(); return; }
     input.disabled = false; sendBtn.disabled = false; input.focus();
     updateLeft();
   }).catch(e => {
     opening.remove();
+    waiting(false);
+    input.placeholder = '';
+    endBtn.classList.add('pulse');
     addLine('sys', e.message || 'They seem unable to speak right now.', 'bad');
     leftEl.textContent = '';
     aud.over = true;
   });
+}
+
+/** After an audience: what the character will remember, as a note that stays until you close it. */
+function memoryNote(game, c, pending, done) {
+  const s = game.state;
+  let closed = false;
+  const close = () => { if (closed) return; closed = true; back.remove(); document.removeEventListener('keydown', key, true); done(); };
+  const key = e => { if (e.key === 'Enter' || e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); close(); } };
+  const list = h('div.memnote-list', null, h('div.line.typing', null, typingDots(), ' Writing it into Walrus Memory…'));
+  const panel = h('div.panel.dialog.memnote', null,
+    ['tl', 'tr', 'bl', 'br'].map(k => h('i.corner.' + k)),
+    h('div.titlebar', null, `${c.name} will remember…`),
+    h('div.dialog-body', null, h('div.medal', null, h('img', { src: stillURL(s, c, 120, moodExpr(opinionOf(s, c).total)) })), list),
+    h('div.dialog-foot', null, h('button.btn.dark', { onclick: close }, 'Continue')));
+  const back = h('div.modal-back', { onclick: e => { if (e.target === back) close(); } }, panel);
+  document.body.append(back);
+  document.addEventListener('keydown', key, true);
+  pending.then(r => {
+    list.innerHTML = '';
+    const notes = (r && r.notes) || [];
+    if (notes.length) { notes.forEach(n => list.append(h('div.mem.fresh', null, n))); sfx('snap'); }
+    else list.append(h('div.muted', null, 'Nothing worth remembering, it seems.'));
+  }).catch(() => { list.innerHTML = ''; list.append(h('div.muted', null, 'The scribe dropped the quill. (Memory is unavailable.)')); });
 }

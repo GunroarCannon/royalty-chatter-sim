@@ -8,7 +8,7 @@ import path from 'node:path';
 const URL = (process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/$/, '');
 const TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 export const remote = !!(URL && TOKEN);
-const PREFIX = 'rb:';
+const PREFIX = process.env.STORE_PREFIX || 'rb:'; // local dev uses its own prefix so test worlds never mix with the live ones
 const DATA = path.resolve(process.env.DATA_DIR || 'data');
 
 async function redis(...cmd) {

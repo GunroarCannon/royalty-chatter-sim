@@ -5,7 +5,7 @@ import {
   player, playerRealm, council, record, addMod, fullName, roleLabel, opinionOf, atWar, allied, neighborsOfRealm, provincesOf,
   TRAITS, ageOf, dateStr, ROLE_INFO, heirOf, forHuman, humanPid, isHumanRealm,
 } from './world.js';
-import { declareWar, endWar, makePromise, notifyRealm, pushInbox } from './sim.js';
+import { declareWar, endWar, makePromise, keepPromise, notifyRealm, pushInbox } from './sim.js';
 import { queueEvent, resolveEvent } from './events.js';
 import { CULTURES, PRESETS } from './cultures.js';
 
@@ -203,6 +203,54 @@ export function sendLetter(state, realmId, text) {
 const isRulerOfHuman = (state, c) => state.realms[c.realm] && state.realms[c.realm].ruler === c.id && isHumanRealm(state, c.realm) && c.realm !== state.playerRealm;
 export { isRulerOfHuman };
 
+// ---------------------------------------------------------------- keeping your word early
+export const openPromisesTo = (state, charId) => state.promises.filter(p => p.to === charId && p.status === 'open');
+
+/** What keeping promise `p` right now would take, for button labels: { label, cost, ok, why }. */
+export function keepCost(state, map, p) {
+  if (p.kind === 'gold') return { label: `Pay ${p.amount} 💰`, ok: state.gold >= p.amount, why: `You need ${p.amount} gold.` };
+  if (p.kind === 'war' && p.target != null) {
+    const t = state.realms[p.target];
+    if (!t || !t.alive || atWar(state, state.playerRealm, p.target)) return { label: 'Mark as kept', ok: true };
+    const near = map ? neighborsOfRealm(state, map, state.playerRealm).includes(p.target) : true;
+    return { label: `⚔ War on ${t.name}`, ok: near, why: `${t.name} does not border you.` };
+  }
+  return { label: 'Honour it (−30 💰)', ok: state.gold >= 30, why: 'Honouring it costs 30 gold.' };
+}
+
+/** Keep a promise before it falls due. `opts.noWar`: never declare war from here (audiences). */
+export function fulfilPromise(state, map, promiseId, opts = {}) {
+  const p = state.promises.find(x => x.id === promiseId);
+  if (!p || p.status !== 'open') return { ok: false, msg: 'That promise is already settled.' };
+  const c = state.chars[p.to];
+  const done = (how, msg) => {
+    keepPromise(state, p, how);
+    state.queue = state.queue.filter(q => !(q.id === 'promise_due' && q.cast && q.cast.promise === p.id));
+    return { ok: true, msg };
+  };
+  if (p.kind === 'gold') {
+    if (state.gold < p.amount) return { ok: false, msg: `You need ${p.amount} gold to keep this promise.` };
+    state.gold -= p.amount;
+    if (state.players && isRulerOfHuman(state, c)) {
+      const from = fullName(state, player(state));
+      forHuman(state, c.realm, () => { state.gold += p.amount; pushInbox(state, '💰', `${from} kept their word and paid you ${p.amount} gold.`); });
+    }
+    return done(`paid ${p.amount} gold`, `${c.name} counts every coin, twice, and smiles. Promise kept.`);
+  }
+  if (p.kind === 'war' && p.target != null) {
+    const t = state.realms[p.target];
+    if (!t || !t.alive) return done('the enemy is no more', 'Their enemy is gone. Promise kept.');
+    if (atWar(state, state.playerRealm, p.target)) return done('war was declared', `You are already at war with ${t.name}. Promise kept.`);
+    if (opts.noWar || !map) return { ok: false, msg: `Declare war on ${t.name} to keep it.` };
+    const r = playerDeclareWar(state, map, p.target);
+    if (!r.ok) return r;
+    return done('war was declared', `${r.msg} Your word is iron.`);
+  }
+  if (state.gold < 30) return { ok: false, msg: 'Honouring it costs 30 gold.' };
+  state.gold -= 30;
+  return done('', `It costs you 30 gold, but your word holds. ${c.name} is pleased.`);
+}
+
 /** Spend an audience bell (free ones come from events that offer to talk to this character). */
 export function spendAudience(state, charId, free) {
   const c = state.chars[charId];
@@ -233,6 +281,7 @@ export const ACTIONS = {
     return { ok: true, msg: resolveEvent(s, m, item, key) };
   },
   audience: (s, m, charId, free) => spendAudience(s, charId, free),
+  keep: (s, m, promiseId) => fulfilPromise(s, m, String(promiseId)),
 };
 
 // ---------------------------------------------------------------- audiences
@@ -333,6 +382,7 @@ export function audienceContext(state, map, c) {
       previousRulers: prevRulers,
     },
     promises, recent, campaign: state.campaign,
+    openPromises: openPromisesTo(state, c.id).map((p, i) => ({ n: i + 1, text: p.text, kind: p.kind, amount: p.amount || 0 })),
   };
 }
 
@@ -376,10 +426,28 @@ export function applyExchange(state, c, aud, out) {
     aud.promises++;
     notes.push(`Promise recorded: "${p.text}"`);
   }
+  // the ruler made good on an open promise during the talk (pays the gold now, etc.)
+  const kp = Math.round(+out.kept_promise || 0);
+  if (kp > 0) {
+    const p = openPromisesTo(state, c.id)[kp - 1];
+    if (p) {
+      const r = fulfilPromise(state, null, p.id, { noWar: true });
+      notes.push(r.ok ? `Promise kept: "${p.text}"${p.kind === 'gold' ? ` (−${p.amount} gold)` : p.kind === 'vague' ? ' (−30 gold)' : ''}` : r.msg);
+    }
+  }
   return notes;
 }
 
 export function finishAudience(state, map, c, aud) {
   state.stats.conversations++;
   if (aud.peaceWar && state.wars.includes(aud.peaceWar)) endWar(state, map, aud.peaceWar, 'white');
+  // sometimes a conversation has consequences that arrive right after it
+  if (!c || !c.alive || state.queue.some(q => q.id === 'aud_after')) return;
+  const rng = new RNG(`after:${state.seed}:${state.turn}:${c.id}:${aud.id}`);
+  const d = aud.delta || 0;
+  if (d >= 6 && rng.chance(0.4)) queueEvent(state, 'aud_after', { a: c.id, mood: 'warm' });
+  else if ((d <= -8 || aud.walked) && rng.chance(0.45)) {
+    const others = Object.values(council(state)).filter(o => o.id !== c.id && o.alive);
+    queueEvent(state, 'aud_after', { a: c.id, b: others.length ? rng.pick(others).id : null, mood: 'sour' });
+  }
 }

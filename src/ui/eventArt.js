@@ -13,6 +13,7 @@ const SCENES = {
   tithe: ['shrine', 'rain'], jester: ['drum', 'indoor'], insult_letter: ['letter', 'indoor'], treasure: ['chest', 'day'], plot: ['dagger', 'night'],
   harvest: ['wheat', 'rain'], birth: ['cradle', 'indoor'], succession: ['crown', 'night'], war_declared: ['banners', 'dusk'], alliance_offer: ['handshake', 'day'],
   battle: ['swords', 'dusk'], promise_due: ['hourglass', 'indoor'], audience_request: ['bell', 'indoor'], bankrupt: ['emptychest', 'indoor'], letter: ['letter', 'indoor'],
+  aud_after: ['feast', 'indoor'], npc_gift: ['chest', 'day'], tribute_demand: ['coins', 'indoor'], call_to_arms: ['banners', 'dusk'],
 };
 
 export function eventArt(id, seed, extra = {}) {

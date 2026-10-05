@@ -29,7 +29,8 @@ export function openChronicle(game, tab = 'chronicle') {
       for (const p of s.promises.slice().reverse()) {
         const c = s.chars[p.to];
         pages.append(h('div.promise.' + p.status, { style: { cursor: 'pointer' }, onclick: () => { back.remove(); game.selectChar(c.id); } },
-          h('b', null, `${c.name}: `), `"${p.text}"`, h('div.muted', { style: { fontSize: '12px' } }, p.status === 'open' ? `Due in ${Math.max(0, p.due - s.turn)} season(s)` : p.status.toUpperCase())));
+          h('b', null, `${c.name}: `), `"${p.text}"`, h('div.muted', { style: { fontSize: '12px' } }, p.status === 'open' ? `Due in ${Math.max(0, p.due - s.turn)} season(s)` : p.status.toUpperCase()),
+          p.status === 'open' ? game.keepBtn(p, () => show('promises')) : null));
       }
     } else if (t === 'reigns') {
       pages.classList.add('single');

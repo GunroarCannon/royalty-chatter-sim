@@ -9,6 +9,7 @@ import { warBar, scoreFor } from './war.js';
 import { armsEl } from './heraldry.js';
 import { eventArt } from './eventArt.js';
 import { foodOf } from '../../shared/sim.js';
+import { sfx } from '../audio.js';
 
 export function showEvent(game, item, done) {
   const s = game.state;
@@ -45,6 +46,8 @@ export function showEvent(game, item, done) {
       if (o.reply) { close(); game.resolveEvent(item, o.key).then(() => { done(); game.writeLetter(o.reply.to, game.state.chars[game.state.realms[o.reply.to].ruler]); }); return; }
       optsEl.querySelectorAll('.btn').forEach(b => { b.disabled = true; });
       const res = await game.resolveEvent(item, o.key);
+      if (item.id === 'battle') sfx('swords');
+      else if (/war|banners go up|drums|March/i.test(res || '')) sfx('drums');
       if (res) {
         const stamp = /^Victory!/.test(res) ? h('div.stamp.win', null, 'Victory') : /^Defeat!/.test(res) ? h('div.stamp.lose', null, 'Defeat') : null;
         const w2 = cast.war && game.state.wars.find(x => x.id === cast.war);
@@ -72,5 +75,6 @@ export function showEvent(game, item, done) {
     optsEl);
   back.append(panel);
   document.body.append(back);
+  sfx(item.id === 'war_declared' || item.id === 'call_to_arms' ? 'drums' : item.id === 'battle' ? 'march' : 'snap');
   draggable(panel, { handle: panel.querySelector('.titlebar') });
 }

@@ -152,6 +152,7 @@ Their reputation this reign: ${r.reputation.promisesKept} promises kept, ${r.rep
 WHAT YOU REMEMBER (real past events, oldest first; "cN" = campaign N. Bring these up NATURALLY when relevant: promises owed, broken promises, debts, insults, kindnesses. Deeds of earlier rulers belong to "your late father/mother/predecessor"; memories from earlier campaigns are old family tales):
 ${memories}
 ${ctx.promises.length ? 'PROMISES THE RULER MADE YOU: ' + ctx.promises.join('; ') : ''}
+${ctx.openPromises && ctx.openPromises.length ? 'OPEN PROMISES (numbered): ' + ctx.openPromises.map(p => `#${p.n} "${p.text}"`).join('; ') : ''}
 ${mem.world.length ? 'GOSSIP FROM DISTANT LANDS (only mention if it fits): ' + mem.world.map(m => memLine(m.text).replace(/^\[Tales from afar\]\s*/, '')).join(' | ') : ''}
 
 ${c.proxy ? `YOU SPEAK FOR A ROYAL HOUSE RULED BY ANOTHER PLAYER (${c.proxy.name}), who is away. Speak as their ruler would, guided by what their dynasty remembers. Make no binding promises on their behalf; say you will "put it to the council".\n\n` : ''}YOUR FATE THIS AUDIENCE (decided already; never contradict it, never describe it as rules):
@@ -162,6 +163,7 @@ Respond with JSON only:
  "opinion_delta": integer -12..8 (how this exchange changes your feeling; flattery/gifts/apology/keeping word = up, insults/threats/lies/broken promises = down; usually -3..3),
  "player_promise": null OR {"text": "the ruler's commitment as a short first-person quote, e.g. 'I will pay you 50 gold by winter'", "kind": "gold" | "war" | "vague", "amount": number or null, "target": "realm name or null", "deadline_seasons": 1-12},
  "granted": null OR {"type": "gold" | "alliance" | "peace" | "troops", "amount": number or null} (ONLY if you agree to it in THIS line AND your fate allows it),
+ "kept_promise": null OR the number of an OPEN promise that the ruler fulfils RIGHT NOW in their message (e.g. hands over the promised gold, or says they have done what they promised). Thank them warmly if so,
  "ends_audience": true if you storm off or the conversation is clearly over}
 Only fill player_promise when the RULER (not you) explicitly commits to a concrete future action. Pleasantries are not promises.`;
 }
@@ -229,7 +231,7 @@ app.post('/api/audience/say', async (req, res) => {
     a.transcript.push({ role: 'assistant', content: JSON.stringify({ line: out.line }) });
     a.lines.push({ who: 'ruler', text: msg }, { who: 'them', text: out.line });
     const reply = sanitize(out);
-    if (reply.ends_audience) a.walked = true;
+    if (reply.ends_audience) a.walked = a.aud.walked = true;
     let notes, opinion;
     if (a.world) {
       try {
@@ -244,6 +246,7 @@ app.post('/api/audience/say', async (req, res) => {
   } catch (e) {
     console.error(e);
     a.msgs--;
+    if (a.transcript.length && a.transcript[a.transcript.length - 1].role === 'user') a.transcript.pop(); // so a retry is not said twice
     res.status(502).json({ error: 'The character stares blankly. (' + e.message.slice(0, 120) + ')' });
   }
 });
@@ -312,6 +315,7 @@ app.post('/api/advisor', async (req, res) => {
   const sys = `You are ${String(facts.advisor || 'the royal advisor').slice(0, 80)}, a loyal, dry-witted advisor to ${String(facts.ruler || 'the ruler').slice(0, 80)} in a lighthearted medieval court game.${facts.setting ? ' Setting: ' + String(facts.setting).slice(0, 200) : ''}
 Help the ruler find things and decide. Reply in 1–3 short sentences (under 70 words), warm and a little funny. If the request does not fully apply (e.g. they are already married), say so cheerfully and help anyway.
 When the ruler asks you to find, suggest, rank or list something, choose 1–4 entries ONLY from the lists below, by their exact "ref". Never invent refs or names. Give each a short reason (under 14 words) based on the facts given.
+Each card you pick has buttons that DO things (declare war, propose an alliance, propose marriage, keep a promise, give a gift, talk). When the ruler asks you to DO something ("keep my promise to X", "ally with Y", "attack Z"), pick the matching card and tell them to press its button. Promises are refs starting "p:".
 ${RULES}
 
 THE STATE OF THE REALM:
@@ -341,6 +345,7 @@ function sanitize(out) {
     player_promise: o.player_promise && o.player_promise.text ? o.player_promise : null,
     granted: o.granted && o.granted.type ? o.granted : null,
     ends_audience: !!o.ends_audience,
+    kept_promise: Number.isFinite(+o.kept_promise) && +o.kept_promise > 0 ? Math.round(+o.kept_promise) : null,
   };
 }
 

@@ -391,6 +391,82 @@ def('envoy_spoke', {
   auto: 'ok',
 });
 
+// --------------------------------------------------------------- after an audience
+const isForeignRuler = (s, c) => c.realm !== s.playerRealm && s.realms[c.realm] && s.realms[c.realm].ruler === c.id;
+
+def('aud_after', {
+  title: (s, m, { mood }) => (mood === 'warm' ? 'Word Gets Around' : 'Tongues Wag'), icon: '🗣', auto: 'ok',
+  text: (s, m, { a, b, mood }) => {
+    const c = C(s, a), foreign = isForeignRuler(s, c);
+    if (mood === 'warm') return foreign
+      ? `A rider from ${s.realms[c.realm].name} arrives with a small chest and a note in ${fullName(s, c)}'s own hand: "A pleasure to speak with you. Do call again."`
+      : `${c.name} has been singing your praises at dinner, at length, to anyone who will listen. Some of it rhymes.`;
+    return foreign
+      ? `${fullName(s, c)}'s envoys left your court in a huff. Merchants say ${he(c)} has started counting your soldiers, out loud, at dinner.`
+      : `${b && C(s, b) ? C(s, b).name + ' leans in. "' : '"'}The whole court heard about your talk with ${c.name}, Majesty. Nobody is talking about anything else."`;
+  },
+  options: (s, m, { a, mood }) => {
+    const c = C(s, a), foreign = isForeignRuler(s, c);
+    if (mood === 'warm') return foreign
+      ? [{ key: 'ok', label: 'Open the chest (+40 gold)', run: s2 => { gold(s2, 40); record(s2, `${fullName(s2, C(s2, a))} sent ${fullName(s2, P(s2))} 40 gold after a friendly audience.`, { kind: 'gift', chars: [a] }); return 'Forty gold, and a pressed flower.'; } },
+        { key: 'return', label: 'Open it, and send a gift back (+40, −20 gold)', run: s2 => { gold(s2, -20); gold(s2, 40); addMod(C(s2, a), 'Gracious friend', 15, 16, 'gift'); return 'Friendship, with interest.'; } }]
+      : [{ key: 'ok', label: 'Splendid (+5 prestige)', run: s2 => { pr(s2, 5); return 'Your reputation glows a little.'; } },
+        { key: 'reward', label: 'Reward the loyalty (−20 gold)', disabled: s.gold < 20, run: s2 => { gold(s2, -20); addMod(C(s2, a), 'Rewarded my loyalty', 15, 16, 'gift'); return `${C(s2, a).name} bows very low.`; } }];
+    return [
+      { key: 'gift', label: `Send ${c.name} a peace offering (−25 gold)`, disabled: s.gold < 25, run: s2 => { gold(s2, -25); addMod(C(s2, a), 'Peace offering', 15, 12, 'gift'); return 'The gift is accepted. Coldly, but accepted.'; } },
+      { key: 'ok', label: 'Let them talk', tip: foreign ? 'They will remember' : '−5 prestige', run: s2 => { if (foreign) addMod(C(s2, a), 'Ignored my anger', -5, 8); else pr(s2, -5); return 'The whispers go on.'; } },
+      { key: 'talk', label: `Talk to ${c.name} again`, talk: a, ends: true },
+    ];
+  },
+});
+
+// --------------------------------------------------------------- the neighbours act on their own (queued by the sim)
+def('npc_gift', {
+  title: 'A Gift Arrives', icon: '🎁', auto: 'thanks',
+  text: (s, m, { a, realm, amount }) => `A caravan from ${s.realms[realm].name} rolls into your courtyard bearing ${amount} gold and a note from ${fullName(s, C(s, a))}: "For a friend. Spend it on something ridiculous."`,
+  options: (s, m, { a, amount }) => [
+    { key: 'thanks', label: `Accept with warm thanks (+${amount} gold)`, run: s2 => { gold(s2, amount); addMod(C(s2, a), 'Accepted my gift', 5, 8); record(s2, `${fullName(s2, C(s2, a))} sent ${fullName(s2, P(s2))} a gift of ${amount} gold.`, { kind: 'gift', chars: [a] }); return 'The gold is counted. The note is framed.'; } },
+    { key: 'return', label: 'Return it, politely (+5 prestige)', run: s2 => { pr(s2, 5); addMod(C(s2, a), 'Too proud for gifts', -5, 8); return 'Your pride is intact. Your treasury is not richer.'; } },
+  ],
+});
+
+def('tribute_demand', {
+  title: 'A Demand for Tribute', icon: '🪙', auto: 'refuse',
+  text: (s, m, { a, realm, amount }) => `An envoy from ${s.realms[realm].name} unrolls a very long scroll. ${fullName(s, C(s, a))}, whose host outnumbers yours, demands ${amount} gold "for the continued enjoyment of peace".`,
+  options: (s, m, { a, realm, amount }) => [
+    { key: 'pay', label: `Pay the tribute (−${amount} gold)`, disabled: s.gold < amount, tip: 'Safe, but it stings (−5 prestige)', run: s2 => { gold(s2, -amount); pr(s2, -5); addMod(C(s2, a), 'Paid me tribute', 15, 12); record(s2, `${fullName(s2, P(s2))} paid ${amount} gold in tribute to ${fullName(s2, C(s2, a))}.`, { kind: 'diplomacy', chars: [a] }); return 'The envoy bites every coin.'; } },
+    { key: 'refuse', label: '"Come and take it."', tip: 'They may well declare war', run: (s2, m2, c, rng) => {
+      addMod(C(s2, a), 'Refused my tribute', -15, 12);
+      record(s2, `${fullName(s2, P(s2))} refused to pay tribute to ${fullName(s2, C(s2, a))}.`, { kind: 'diplomacy', chars: [a] });
+      if (rng.chance(0.5) && !atWar(s2, realm, s2.playerRealm)) {
+        const w = declareWar(s2, m2, realm, s2.playerRealm);
+        if (w) { record(s2, `${fullName(s2, C(s2, a))} of ${s2.realms[realm].name} declared war on us over unpaid tribute.`, { kind: 'war', chars: [a] }); s2.flags.mapDirty = true; return 'The envoy rips up the scroll. War!'; }
+      }
+      return 'The envoy leaves, muttering. For now.';
+    } },
+    { key: 'talk', label: `Haggle with ${C(s, a).name}`, talk: a },
+  ],
+});
+
+def('call_to_arms', {
+  title: 'A Call to Arms', icon: '📯', auto: 'excuse',
+  text: (s, m, { a, enemy }) => `A breathless messenger: your ally ${fullName(s, C(s, a))} is at war with ${s.realms[enemy].name} and calls on you to honour your alliance.`,
+  options: (s, m, { a, realm, enemy }) => {
+    const near = neighborsOfRealm(s, m, s.playerRealm).includes(enemy) && !atWar(s, enemy, s.playerRealm) && !(s.players && humanPid(s, enemy));
+    return [
+      { key: 'join', label: `Join the war on ${s.realms[enemy].name}`, disabled: !near, tip: near ? 'Your ally will love you for it' : 'They do not border you', run: (s2, m2) => {
+        s2.stats.wars++; const w = declareWar(s2, m2, s2.playerRealm, enemy, 'ally'); s2.flags['warWith' + enemy] = s2.turn; s2.flags.mapDirty = true;
+        addMod(C(s2, a), 'Answered my call', 30, 24);
+        record(s2, `${fullName(s2, P(s2))} answered ${fullName(s2, C(s2, a))}'s call to arms against ${s2.realms[enemy].name}.`, { kind: 'war', chars: [a] });
+        return w ? 'The banners go up. Your ally cheers.' : '';
+      } },
+      { key: 'gold', label: 'Send gold for their war (−40 gold)', disabled: s.gold < 40, run: s2 => { gold(s2, -40); addMod(C(s2, a), 'Funded my war', 15, 16); return 'Gold instead of blood. They take it.'; } },
+      { key: 'excuse', label: 'Make polite excuses', tip: 'Your ally will be hurt', run: s2 => { addMod(C(s2, a), 'Ignored my call to arms', -20, 20); record(s2, `${fullName(s2, P(s2))} ignored a call to arms from ally ${fullName(s2, C(s2, a))}.`, { kind: 'diplomacy', chars: [a] }); return '"My horse is unwell," you write. Nobody believes it.'; } },
+      { key: 'talk', label: `Talk to ${C(s, a).name}`, talk: a },
+    ];
+  },
+});
+
 def('bankrupt', {
   title: 'The Treasury Is Empty', icon: '🕳',
   text: s => `Your steward opens the treasury chest. A moth flies out. You owe ${-s.gold} gold, and the guards are asking about wages.`,

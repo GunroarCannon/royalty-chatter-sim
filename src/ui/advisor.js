@@ -6,11 +6,11 @@ import {
   maxLevies, TRAITS, livingCourt, dateStr,
 } from '../../shared/world.js';
 import { PRESETS } from '../../shared/cultures.js';
-import { marriageablesOfMine, marriageCandidates } from '../../shared/actions.js';
+import { marriageablesOfMine, marriageCandidates, marriageBlock, canTalk, keepCost, openPromisesTo } from '../../shared/actions.js';
 import { reputation } from '../../shared/sim.js';
 import { stillURL, moodExpr } from '../portraits.js';
 import { api } from '../api.js';
-import { h, tipHTML } from './dom.js';
+import { h, tipHTML, esc, typingDots } from './dom.js';
 import { armsEl } from './heraldry.js';
 import { draggable } from './drag.js';
 import { openWar } from './war.js';
@@ -67,7 +67,7 @@ export function advisorFacts(game) {
   lists.friends = scored.filter(x => x.o > 0).sort((a, b) => b.o - a.o).slice(0, 6).map(({ c, o }) => ({ ref: 'c:' + c.id, name: fullName(s, c), role: roleLabel(s, c), feels: o }));
   lists.gold = people.filter(c => ['banker', 'steward', 'spouse'].includes(c.role) && c.realm === pr.id || (s.realms[c.realm].ruler === c.id && c.realm !== pr.id && opinionOf(s, c).total > 40))
     .map(c => ({ ref: 'c:' + c.id, name: fullName(s, c), role: roleLabel(s, c), feels: opinionOf(s, c).total, hint: c.role === 'banker' ? 'lends gold (with interest)' : c.role === 'steward' ? 'gives a little if they like you (15+)' : c.role === 'spouse' ? 'helps if fond of you (30+)' : 'a friendly ruler may gift 50' })).slice(0, 6);
-  lists.promises = s.promises.filter(p => p.status === 'open').map(p => ({ ref: 'c:' + p.to, to: s.chars[p.to].name, text: p.text, dueInSeasons: p.due - s.turn }));
+  lists.promises = s.promises.filter(p => p.status === 'open').map(p => ({ ref: 'p:' + p.id, to: s.chars[p.to].name, text: p.text, dueInSeasons: p.due - s.turn, toKeep: keepCost(s, map, p).label }));
   lists.council = Object.values(cn).map(c => ({ ref: 'c:' + c.id, name: c.name, role: roleLabel(s, c), feels: opinionOf(s, c).total }));
   lists.wars = s.wars.filter(w => w.attacker === pr.id || w.defender === pr.id).map(w => ({ ref: 'w:' + w.id, vs: s.realms[w.attacker === pr.id ? w.defender : w.attacker].name, score: w.attacker === pr.id ? w.score : -w.score, over: game.map.provinces[w.target].name }));
   return {
@@ -80,6 +80,7 @@ export function advisorFacts(game) {
 function localAnswer(q, f) {
   const t = q.toLowerCase(), L = f.lists;
   const pick = (list, n, fn) => list.slice(0, n).map(x => ({ ref: x.ref, why: fn(x) }));
+  if (/promise|owe|keep|fulfil/.test(t)) return { line: L.promises.length ? 'You gave your word to these people. Press a card to keep it.' : 'You owe nobody anything. Refreshing.', picks: pick(L.promises, 4, x => `"${x.text}", due in ${x.dueInSeasons}.`) };
   if (/war|attack|conquer|invade|fight|enemy realm/.test(t)) {
     const ok = L.attack.filter(x => !x.alliedToYou && !x.alreadyAtWar);
     return ok.length ? { line: 'These neighbours look tempting. Mind the numbers.', picks: pick(ok, 3, x => `${x.theirMen} men against your ${x.yourMen}: ${x.odds} odds.`) } : { line: 'No neighbour worth attacking right now, sire.', picks: [] };
@@ -88,7 +89,6 @@ function localAnswer(q, f) {
   if (/all(y|ies|iance)|friend/.test(t)) return { line: 'These rulers like you best. Alliances need them fond of you (30+).', picks: pick(L.allies, 3, x => `Feels ${x.rulerFeels} about you${x.neighbour ? ', and borders you' : ''}.`) };
   if (/hate|enem|angry|dislike|threat|plot/.test(t)) return { line: L.haters.length ? 'Watch these ones closely.' : 'Remarkably, nobody hates you. Yet.', picks: pick(L.haters, 4, x => `${x.feels}${x.grudge ? ': ' + x.grudge.toLowerCase() : ''}.`) };
   if (/gold|money|coin|rich|treasury|broke|debt/.test(t)) return { line: `You have ${f.realm.gold} gold and earn ${f.realm.income} a season. Ask these people nicely.`, picks: pick(L.gold, 3, x => x.hint) };
-  if (/promise|owe/.test(t)) return { line: L.promises.length ? 'You gave your word to these people.' : 'You owe nobody anything. Refreshing.', picks: pick(L.promises, 4, x => `"${x.text}", due in ${x.dueInSeasons}.`) };
   return { line: 'Press End Season to pass time. Talk to people (it costs a bell 🔔), give gifts, make alliances, and keep your promises. Click any name to see who they are.', picks: [] };
 }
 
@@ -103,36 +103,67 @@ export function openAdvisor(game) {
   const close = () => panel.remove();
 
   const bubble = (who, text) => { const b = h('div.adv-line.' + who, null, who === 'them' ? game.link(text) : text); log.append(b); log.scrollTop = log.scrollHeight; return b; };
-  const pickCard = (p) => {
+  // buttons on a suggestion card that do the thing right away
+  const btn = (label, tip, fn, disabled) => h('button.btn.small', { disabled: !!disabled, 'data-tip': tip, onclick: async e => { e.stopPropagation(); const b = e.currentTarget; const res = await fn(); if (res && res.ok) { b.textContent = '✔ Done'; b.disabled = true; } } }, label);
+  const talkBtn = c => (canTalk(s, c) ? btn('🔔 Talk', s.audiences > 0 ? tipHTML('Talk', 'Costs one 🔔.') : tipHTML('No bells left', 'End the season for another 🔔.'), () => { close(); game.talk(c.id); }, s.audiences <= 0) : null);
+  const keepBtn = p => { const k = keepCost(s, game.map, p); return btn('🤞 ' + k.label, k.ok ? tipHTML('Keep your promise', esc(p.text)) : tipHTML('Not yet', k.why), () => game.keepPromise(p), !k.ok); };
+  const actionsFor = (k, id, facts) => {
+    const inList = (n, ref) => ((facts.lists || {})[n] || []).some(x => x.ref === ref);
+    const out = [];
+    if (k === 'p') { const p = s.promises.find(x => x.id === id); if (p && p.status === 'open') out.push(keepBtn(p)); }
+    else if (k === 'r') {
+      const r = s.realms[+id], ru = s.chars[r.ruler], ref = 'r:' + id, war = atWar(s, r.id, s.playerRealm);
+      const near = neighborsOfRealm(s, game.map, s.playerRealm).includes(r.id);
+      if (war) out.push(btn('⚔ The war', tipHTML('The war'), () => { close(); openWar(game, war.id); }));
+      else {
+        if (!allied(s, r.id, s.playerRealm) && (inList('allies', ref) || !inList('attack', ref))) out.push(btn('🤝 Ally', tipHTML('Propose an alliance', `They need to like you (30+). Now: ${opinionOf(s, ru).total}.`), () => game.action('alliance', ru.id)));
+        if (near && (inList('attack', ref) || !inList('allies', ref))) out.push(btn('⚔ Declare war', tipHTML('Declare war', `${r.levies} men against your ${playerRealm(s).levies}.`), () => { close(); game.declareWar(r); }));
+      }
+      if (ru) out.push(talkBtn(ru));
+    } else if (k === 'c') {
+      const c = s.chars[id], ref = 'c:' + id;
+      if (!c || !c.alive) return out;
+      for (const p of openPromisesTo(s, c.id).slice(0, 1)) out.push(keepBtn(p));
+      const fam = marriageablesOfMine(s).filter(w => !marriageBlock(s, c, w));
+      if (fam.length && inList('marry', ref)) out.push(btn('💍 Propose', tipHTML('Propose marriage'), () => { close(); game.proposeMarriage(c, fam); }));
+      if (inList('haters', ref) || inList('friends', ref) || inList('gold', ref)) out.push(btn(`💰 Gift ${game.giftAmount()}`, tipHTML('Send a gift', 'They will like you more.'), () => game.action('gift', c.id, game.giftAmount()), s.gold < 25));
+      out.push(talkBtn(c));
+    } else if (k === 'w') {
+      out.push(btn('🕊 Offer peace', tipHTML('Offer peace'), () => game.action('peace', id)));
+    }
+    return out.filter(Boolean);
+  };
+  const pickCard = (p, facts) => {
     const [k, id] = [p.ref[0], p.ref.slice(2)];
     let icon, name, sub;
     if (k === 'r') { const r = s.realms[+id]; if (!r) return null; icon = armsEl(r); name = r.name; sub = s.chars[r.ruler] ? fullName(s, s.chars[r.ruler]) : ''; }
     else if (k === 'c') { const c = s.chars[id]; if (!c) return null; icon = h('div.medal.sm', null, h('img', { src: stillURL(s, c, 80, moodExpr(opinionOf(s, c).total)) })); name = fullName(s, c); sub = roleLabel(s, c); }
     else if (k === 'w') { const w = s.wars.find(x => x.id === id); if (!w) return null; icon = h('span.adv-ic', null, '⚔'); name = `War with ${s.realms[w.attacker === s.playerRealm ? w.defender : w.attacker].name}`; sub = game.map.provinces[w.target].name; }
+    else if (k === 'p') { const pr = s.promises.find(x => x.id === id); const c = pr && s.chars[pr.to]; if (!c) return null; icon = h('div.medal.sm', null, h('img', { src: stillURL(s, c, 80, moodExpr(opinionOf(s, c).total)) })); name = `To ${fullName(s, c)}`; sub = `"${pr.text}"${pr.status === 'open' ? `, due in ${Math.max(0, pr.due - s.turn)}` : ''}`; }
     else return null;
     const go = () => {
       close();
       if (k === 'r') { game.goToRealm(+id); game.selectChar(s.realms[+id].ruler); }
-      else if (k === 'c') { const c = s.chars[id]; if (c.realm !== s.playerRealm) game.goToRealm(c.realm); game.selectChar(id); }
+      else if (k === 'c' || k === 'p') { const c = s.chars[k === 'p' ? s.promises.find(x => x.id === id).to : id]; if (c.realm !== s.playerRealm) game.goToRealm(c.realm); game.selectChar(c.id); }
       else openWar(game, id);
     };
-    return h('div.adv-pick', { onclick: go, 'data-tip': tipHTML('Take me there', 'Closes the advisor') }, icon, h('div.ap-text', null, h('div.ap-name', null, name), h('div.ap-sub', null, sub), p.why ? h('div.ap-why', null, p.why) : null), h('span.ap-go', null, '›'));
+    return h('div.adv-pick', { onclick: go, 'data-tip': tipHTML('Take me there', 'Closes the advisor') }, icon, h('div.ap-text', null, h('div.ap-name', null, name), h('div.ap-sub', null, sub), p.why ? h('div.ap-why', null, p.why) : null, h('div.ap-acts', null, actionsFor(k, id, facts))), h('span.ap-go', null, '›'));
   };
   const ask = async q => {
     q = q.trim();
     if (!q) return;
     input.value = '';
     bubble('me', q);
-    const thinking = bubble('them typing', '…');
+    const thinking = bubble('them typing', typingDots());
     const facts = advisorFacts(game);
     let r;
     try { r = await api.advisor(q, facts, history); }
     catch { r = localAnswer(q, facts); }
     thinking.remove();
     // if the LLM picked nothing for a "find" question, fall back to the rules' picks
-    if ((!r.picks || !r.picks.length) && /find|who|suggest|which|list|attack|marr|ally|hate|gold|owe/i.test(q)) { const l = localAnswer(q, facts); if (l.picks.length) r.picks = l.picks; }
+    if ((!r.picks || !r.picks.length) && /find|who|suggest|which|list|attack|marr|ally|hate|gold|owe|promise|keep/i.test(q)) { const l = localAnswer(q, facts); if (l.picks.length) r.picks = l.picks; }
     bubble('them', r.line);
-    const cards = (r.picks || []).map(pickCard).filter(Boolean);
+    const cards = (r.picks || []).map(p => pickCard(p, facts)).filter(Boolean);
     if (cards.length) { log.append(h('div.adv-picks', null, cards)); log.scrollTop = log.scrollHeight; }
     history.push({ q, a: r.line });
     if (history.length > 6) history.shift();

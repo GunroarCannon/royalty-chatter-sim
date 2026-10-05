@@ -317,7 +317,47 @@ function aiDiplomacy(state, map, rng) {
   const ns = neighborsOfRealm(state, map, state.playerRealm).filter(t => !allied(state, t, state.playerRealm) && !atWar(state, t, state.playerRealm) && !isHumanRealm(state, t));
   for (const t of ns) {
     const ruler = state.chars[state.realms[t].ruler];
-    if (opinionOf(state, ruler).total > 35 && rng.chance(0.08)) { queueEvent(state, 'alliance_offer', { a: ruler.id, realm: t }); break; }
+    if (opinionOf(state, ruler).total > 30 && rng.chance(0.12)) { queueEvent(state, 'alliance_offer', { a: ruler.id, realm: t }); break; }
+  }
+  npcInitiatives(state, map, rng, ns);
+}
+
+/** The other courts get on with their own lives: gifts, tribute demands, calls to arms, news of wars. */
+function npcInitiatives(state, map, rng, ns) {
+  const fl = state.flags, me = state.playerRealm, T = playerRealm(state);
+  const ago = k => (fl[k] == null ? 99 : state.turn - fl[k]);
+  const queued = id => state.queue.some(q => q.id === id);
+  const ai = state.realms.filter(r => r.alive && r.id !== me && !isHumanRealm(state, r.id));
+  // rulers who like you send gifts
+  if (ago('npcGift') >= 4 && !queued('npc_gift')) {
+    const fans = ai.map(r => state.chars[r.ruler]).filter(c => c && opinionOf(state, c).total >= 25);
+    if (fans.length && rng.chance(0.14)) { const c = rng.pick(fans); fl.npcGift = state.turn; queueEvent(state, 'npc_gift', { a: c.id, realm: c.realm, amount: 20 + 10 * rng.int(0, 3) }); }
+  }
+  // strong neighbours who dislike you demand tribute
+  if (ago('tribute') >= 6 && !queued('tribute_demand')) {
+    const bullies = ns.map(t => state.realms[t]).filter(r => r.levies > T.levies * 1.3 && opinionOf(state, state.chars[r.ruler]).total < 0);
+    if (bullies.length && rng.chance(0.1)) {
+      const r = rng.pick(bullies); fl.tribute = state.turn;
+      queueEvent(state, 'tribute_demand', { a: r.ruler, realm: r.id, amount: clamp(Math.round(Math.max(0, state.gold) * 0.25 / 5) * 5, 30, 120) });
+    }
+  }
+  // allies at war call on you
+  for (const a of state.alliances.filter(x => x.includes(me))) {
+    const ally = state.realms[a[0] === me ? a[1] : a[0]];
+    if (!ally || !ally.alive || isHumanRealm(state, ally.id)) continue;
+    const w = state.wars.find(x => (x.attacker === ally.id || x.defender === ally.id) && x.attacker !== me && x.defender !== me);
+    if (!w || fl['cta' + w.id] != null || queued('call_to_arms')) continue;
+    if (!rng.chance(0.4)) continue;
+    fl['cta' + w.id] = state.turn;
+    queueEvent(state, 'call_to_arms', { a: ally.ruler, realm: ally.id, enemy: w.attacker === ally.id ? w.defender : w.attacker, war: w.id });
+    break;
+  }
+  // news: wars that broke out near you this season
+  const near = new Set(neighborsOfRealm(state, map, me));
+  for (const w of state.wars) {
+    if (w.started !== state.turn || w.attacker === me || w.defender === me) continue;
+    if (!near.has(w.attacker) && !near.has(w.defender) && !allied(state, w.attacker, me) && !allied(state, w.defender, me)) continue;
+    (fl.lastTurnEvents || (fl.lastTurnEvents = [])).push({ icon: '⚔', text: `${state.realms[w.attacker].name} has declared war on ${state.realms[w.defender].name}.` });
   }
 }
 
