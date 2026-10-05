@@ -9,7 +9,7 @@ import {
 import { houseName, randomCulture, EPITHETS } from './names.js';
 import { DIFFICULTY } from './world.js';
 import { PRESETS } from './cultures.js';
-import { drawEvents, queueEvent, autoResolveStale } from './events.js';
+import { drawEvents, queueEvent, autoResolveStale, QUEUE_SOFT } from './events.js';
 
 export const turnRng = (state, label = '') => new RNG(`turn:${state.seed}:${state.campaign}:${state.turn}:${label}`);
 
@@ -327,6 +327,7 @@ function npcInitiatives(state, map, rng, ns) {
   const fl = state.flags, me = state.playerRealm, T = playerRealm(state);
   const ago = k => (fl[k] == null ? 99 : state.turn - fl[k]);
   const queued = id => state.queue.some(q => q.id === id);
+  if (state.queue.length > QUEUE_SOFT) return; // a full desk: the courtiers wait
   const ai = state.realms.filter(r => r.alive && r.id !== me && !isHumanRealm(state, r.id));
   // rulers who like you send gifts
   if (ago('npcGift') >= 4 && !queued('npc_gift')) {

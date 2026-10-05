@@ -12,6 +12,7 @@ import { audienceContext, disposition, applyExchange, finishAudience, ACTIONS } 
 import { opinionOf } from '../shared/world.js';
 import { queueEvent } from '../shared/events.js';
 import { forHuman } from '../shared/world.js';
+import { startChat, getChat, sayChat, endChat, recap } from './proxy.js';
 
 const app = express();
 app.use(express.json({ limit: '3mb' }));
@@ -94,6 +95,24 @@ app.post('/api/worlds/:id/act', wrap(req => {
   return act(req.params.id, pid, String(req.body.action), Array.isArray(req.body.args) ? req.body.args.slice(0, 4) : []);
 }));
 
+// live chats between two online players (server/proxy.js)
+app.post('/api/worlds/:id/chat', wrap(req => startChat(req.params.id, cleanPid(req.body.pid), req.body.charId)));
+app.get('/api/chat/:cid', wrap(req => getChat(req.params.cid, cleanPid(req.query.pid), req.query.since)));
+app.post('/api/chat/:cid/say', wrap(req => {
+  const pid = cleanPid(req.body.pid);
+  if (!take('chat:' + pid, 30, 60_000)) throw Object.assign(new Error('Catch your breath, your majesty.'), { status: 429 });
+  return sayChat(req.params.cid, pid, req.body.text);
+}));
+app.post('/api/chat/:cid/end', wrap(req => endChat(req.params.cid, cleanPid(req.body.pid))));
+
+// "while you were away": a short paragraph from the chronicle entries since the player left
+app.post('/api/recap', async (req, res) => {
+  const pid = cleanPid(req.body.pid);
+  if (!pid || !take('recap:' + pid, 12)) return res.status(429).json({ error: 'Later.' });
+  try { res.json(await recap({ ruler: String(req.body.ruler || 'The ruler').slice(0, 80), realm: String(req.body.realm || '').slice(0, 60), entries: Array.isArray(req.body.entries) ? req.body.entries : [], awayMs: req.body.awayMs })); }
+  catch (e) { res.status(502).json({ error: e.message.slice(0, 120) }); }
+});
+
 // ---------------------------------------------------------------- audiences
 const audiences = new Map(); // id → { pid, ctx, fate, transcript, memories, msgs, created }
 setInterval(() => { const now = Date.now(); for (const [k, a] of audiences) if (now - a.created > 3600_000) audiences.delete(k); }, 600_000);
@@ -155,7 +174,7 @@ ${ctx.promises.length ? 'PROMISES THE RULER MADE YOU: ' + ctx.promises.join('; '
 ${ctx.openPromises && ctx.openPromises.length ? 'OPEN PROMISES (numbered): ' + ctx.openPromises.map(p => `#${p.n} "${p.text}"`).join('; ') : ''}
 ${mem.world.length ? 'GOSSIP FROM DISTANT LANDS (only mention if it fits): ' + mem.world.map(m => memLine(m.text).replace(/^\[Tales from afar\]\s*/, '')).join(' | ') : ''}
 
-${c.proxy ? `YOU SPEAK FOR A ROYAL HOUSE RULED BY ANOTHER PLAYER (${c.proxy.name}), who is away. Speak as their ruler would, guided by what their dynasty remembers. Make no binding promises on their behalf; say you will "put it to the council".\n\n` : ''}YOUR FATE THIS AUDIENCE (decided already; never contradict it, never describe it as rules):
+${c.proxy ? `YOU SPEAK FOR A ROYAL HOUSE RULED BY ANOTHER PLAYER (${c.proxy.name}), who is away. Speak as their ruler would, guided by what their dynasty remembers.${c.proxy.guide ? ` What ${c.proxy.name} told their stand-in (follow it): "${c.proxy.guide}".` : ''} Make no binding promises on their behalf; say you will "put it to the council".\n\n` : ''}YOUR FATE THIS AUDIENCE (decided already; never contradict it, never describe it as rules):
 ${fate.fate.join('\n') || '- Nothing special.'}
 
 Respond with JSON only:

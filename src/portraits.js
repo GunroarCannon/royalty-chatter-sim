@@ -83,7 +83,19 @@ export function liveActor(state, c, w = 260, expr = 'neutral') {
   };
   actor.update(0.016); actor.draw();
   raf = requestAnimationFrame(tick);
-  // idle glances
-  const idle = animated ? setInterval(() => { if (!actor.talk && Math.random() < 0.35) actor.act(['look left', 'look right', 'look center', 'look center'][Math.floor(Math.random() * 4)]); }, 2600) : 0;
-  return { actor, el, stop: () => { alive = false; cancelAnimationFrame(raf); clearInterval(idle); actor.destroy(); } };
+  // idle: the eyes wander, the head tilts a touch, now and then a blink, then back to you
+  let idle = 0;
+  const glance = () => {
+    if (!alive) return;
+    if (!actor.talk) {
+      const r = Math.random();
+      if (r < 0.45) actor.t.gaze = (Math.random() * 2 - 1) * 0.85;
+      else if (r < 0.7) actor.t.gaze = 0;
+      else if (r < 0.85) actor.t.turn = actor.g.turn + (Math.random() * 2 - 1) * 0.08;
+      else actor.act(Math.random() < 0.5 ? 'blink' : 'look center');
+    }
+    idle = setTimeout(glance, 1400 + Math.random() * 2800);
+  };
+  if (animated) idle = setTimeout(glance, 1200);
+  return { actor, el, stop: () => { alive = false; cancelAnimationFrame(raf); clearTimeout(idle); actor.destroy(); } };
 }

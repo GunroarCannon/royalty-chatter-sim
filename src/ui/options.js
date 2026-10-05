@@ -1,10 +1,10 @@
 // Per-browser options (text size, sketchiness, animated portraits, tutorial), kept in localStorage.
 import { h, tipHTML } from './dom.js';
 import { resetPositions } from './drag.js';
-import { applyVolumes } from '../audio.js';
+import { applyVolumes, applyVoices } from '../audio.js';
 
 const KEY = 'rb-opts';
-const DEFAULTS = { textSize: 'm', sketchy: true, livePortraits: true, tutorialDone: false, name: '', musicVol: 0.45, sfxVol: 0.7 };
+const DEFAULTS = { textSize: 'm', sketchy: true, livePortraits: true, tutorialDone: false, name: '', musicVol: 0.45, sfxVol: 0.7, voices: true };
 let opts = { ...DEFAULTS };
 try { Object.assign(opts, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch {}
 
@@ -18,6 +18,7 @@ export function setOpt(k, v) {
 export function applyOptions() {
   document.documentElement.style.setProperty('--fs', { s: '13.5px', m: '15px', l: '17px' }[opts.textSize] || '15px');
   document.body.classList.toggle('plain', !opts.sketchy);
+  applyVoices();
 }
 
 const seg = (k, choices) => h('span.seg', null, choices.map(([v, label]) => {
@@ -35,6 +36,7 @@ export function openOptions(game) {
       h('div.opt-row', null, h('span.lbl', null, 'Portraits'), seg('livePortraits', [[true, 'Animated'], [false, 'Still']])),
       h('div.opt-row', null, h('span.lbl', null, 'Music'), seg('musicVol', [[0, 'Off'], [0.2, 'Low'], [0.45, 'Mid'], [0.75, 'High']])),
       h('div.opt-row', null, h('span.lbl', null, 'Sounds'), seg('sfxVol', [[0, 'Off'], [0.35, 'Low'], [0.7, 'Mid'], [1, 'High']])),
+      h('div.opt-row', null, h('span.lbl', null, 'Voices'), seg('voices', [[true, 'Babble'], [false, 'Silent']])),
       h('div.opt-row', null, h('span.lbl', null, 'Your name'), h('input.field', { value: opts.name || '', maxlength: 24, placeholder: 'shown to other players', oninput: e => setOpt('name', e.target.value.trim()) })),
       h('hr.orn'),
       h('div.opt-row', null,

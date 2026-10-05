@@ -255,6 +255,7 @@ export function fulfilPromise(state, map, promiseId, opts = {}) {
 export function spendAudience(state, charId, free) {
   const c = state.chars[charId];
   if (!canTalk(state, c)) return { ok: false, msg: 'They cannot speak with you.' };
+  if (state.players && isRulerOfHuman(state, c) && !autoReplies(state, c.realm)) return { ok: false, msg: `${c.name} only answers letters while their player is away.` };
   if (free && state.queue.some(q => Object.values(q.cast || {}).includes(charId))) return { ok: true, free: true };
   if (state.audiences <= 0) return { ok: false, msg: 'No audiences left this season. End the season to gain another 🔔.' };
   state.audiences--;
@@ -282,7 +283,27 @@ export const ACTIONS = {
   },
   audience: (s, m, charId, free) => spendAudience(s, charId, free),
   keep: (s, m, promiseId) => fulfilPromise(s, m, String(promiseId)),
+  rename: (s, m, name) => renameRuler(s, name),
 };
+
+/** A player's AI stand-in: may it speak (and decide) for the human who rules realmId while they are away? */
+export function autoReplies(state, realmId) {
+  const pid = humanPid(state, realmId), p = pid && state.players && state.players[pid];
+  return !p || !p.auto || p.auto.on !== false;
+}
+
+/** The player renames their ruler. */
+export function renameRuler(state, name) {
+  const clean = String(name || '').replace(/[^\p{L}\p{M}' .-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 24);
+  if (clean.length < 2) return { ok: false, msg: 'A ruler needs a name of at least two letters.' };
+  const c = player(state), old = fullName(state, c);
+  if (clean === c.name) return { ok: true, msg: 'That is already your name.' };
+  c.name = clean;
+  const reign = state.reigns[state.reigns.length - 1];
+  if (reign && reign.ruler === c.id) reign.name = fullName(state, c);
+  record(state, `${old} shall henceforth be known as ${fullName(state, c)}. The heralds sigh and repaint everything.`, { kind: 'court', chars: [c.id] });
+  return { ok: true, msg: `You are now ${fullName(state, c)}.` };
+}
 
 // ---------------------------------------------------------------- audiences
 
@@ -372,7 +393,7 @@ export function audienceContext(state, map, c) {
       traits: c.traits.map(t => `${TRAITS[t].label} (${TRAITS[t].persona})`), quirk: c.quirk, opinion: op.total,
       opinionReasons: op.parts.filter(p => p.label !== 'Base' && p.value).map(p => `${p.label} ${p.value > 0 ? '+' : ''}${p.value}`),
       relationship: rel, stats: c.stats,
-      proxy: state.players && isRulerOfHuman(state, c) ? { pid: humanPid(state, c.realm), name: state.players[humanPid(state, c.realm)].name } : null,
+      proxy: state.players && isRulerOfHuman(state, c) ? { pid: humanPid(state, c.realm), name: state.players[humanPid(state, c.realm)].name, guide: String((state.players[humanPid(state, c.realm)].auto || {}).guide || '').slice(0, 600) } : null,
     },
     ruler: {
       name: fullName(state, pl), shortName: pl.name, house: state.dynasty, age: ageOf(state, pl), realm: pr.name, realmKind: pr.kind,
@@ -442,7 +463,7 @@ export function finishAudience(state, map, c, aud) {
   state.stats.conversations++;
   if (aud.peaceWar && state.wars.includes(aud.peaceWar)) endWar(state, map, aud.peaceWar, 'white');
   // sometimes a conversation has consequences that arrive right after it
-  if (!c || !c.alive || state.queue.some(q => q.id === 'aud_after')) return;
+  if (!c || !c.alive || state.queue.length >= 2 || state.queue.some(q => q.id === 'aud_after')) return;
   const rng = new RNG(`after:${state.seed}:${state.turn}:${c.id}:${aud.id}`);
   const d = aud.delta || 0;
   if (d >= 6 && rng.chance(0.4)) queueEvent(state, 'aud_after', { a: c.id, mood: 'warm' });

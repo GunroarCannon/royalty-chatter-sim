@@ -32,5 +32,10 @@ export const api = {
   leaveWorld: id => req(`/api/worlds/${id}/leave`, { pid: playerId }),
   worldView: (id, v) => req(`/api/worlds/${id}/view?pid=${playerId}${v ? '&v=' + v : ''}`),
   worldAct: (id, action, args) => req(`/api/worlds/${id}/act`, { pid: playerId, action, args }),
+  chatStart: (worldId, charId) => req(`/api/worlds/${worldId}/chat`, { pid: playerId, charId }),
+  chatGet: (id, since) => req(`/api/chat/${id}?pid=${playerId}&since=${since || 0}`),
+  chatSay: (id, text) => req(`/api/chat/${id}/say`, { pid: playerId, text }),
+  chatEnd: id => req(`/api/chat/${id}/end`, { pid: playerId }),
+  recap: o => req('/api/recap', Object.assign({ pid: playerId }, o)),
   advisor: (question, facts, history) => req('/api/advisor', { pid: playerId, question, facts, history }),
 };

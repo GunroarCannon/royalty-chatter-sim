@@ -317,6 +317,12 @@ export class MapView {
       const [x, y] = this.map.provinces[w.target].center;
       ctx.save(); ctx.globalAlpha = 0.55; drawCrossedSwords(ctx, x, y - 14, 9 * lw); ctx.restore();
     }
+    // other players' realms: a blue pennant with their name over the capital (green dot when online)
+    if (st.humans) for (const [rid, hu] of Object.entries(st.humans)) {
+      if (hu.me || !st.realms[rid] || !st.realms[rid].alive) continue;
+      const cap = this.map.provinces[st.realms[rid].capital];
+      if (cap) drawPlayerTag(ctx, cap.center[0], cap.center[1] - 22 * lw, 1.1 * lw, hu.name, hu.online);
+    }
     if (this.selectedRealm != null) {
       ctx.save();
       ctx.strokeStyle = 'rgba(255,236,170,0.95)'; ctx.lineWidth = 3 * lw; ctx.shadowColor = 'rgba(255,220,120,0.9)'; ctx.shadowBlur = 10;
@@ -386,6 +392,15 @@ export class MapView {
     };
     const spread = () => { const [a, b] = [...touches.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; };
     window.addEventListener('resize', () => this.resize());
+    // arrow keys / WASD pan, + and - zoom (unless you are typing somewhere)
+    window.addEventListener('keydown', e => {
+      const t = e.target;
+      if (e.ctrlKey || e.metaKey || e.altKey || (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) || document.querySelector('.modal-back')) return;
+      const step = Math.min(window.innerWidth, window.innerHeight) * 0.12;
+      const k = e.key.toLowerCase(), mv = { arrowleft: [-1, 0], a: [-1, 0], arrowright: [1, 0], d: [1, 0], arrowup: [0, -1], w: [0, -1], arrowdown: [0, 1], s: [0, 1] }[k];
+      if (mv) { e.preventDefault(); this.pan(mv[0] * step, mv[1] * step); }
+      else if (k === '+' || k === '=' || k === '-') zoomAt(window.innerWidth / 2, window.innerHeight / 2, this.view.z * (k === '-' ? 0.85 : 1.18));
+    });
     cv.addEventListener('pointerdown', e => {
       if (this.drift) return;
       if (e.pointerType === 'touch') touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -426,6 +441,8 @@ export class MapView {
     cv.addEventListener('wheel', e => {
       e.preventDefault();
       if (this.drift) return;
+      // sideways swipes (trackpads, tilt wheels) and shift+wheel pan; the plain wheel zooms
+      if (!e.ctrlKey && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY))) { this.pan(e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX, e.shiftKey ? 0 : e.deltaY); return; }
       const r = cv.getBoundingClientRect();
       zoomAt(e.clientX - r.left, e.clientY - r.top, this.view.z * Math.exp(-e.deltaY * 0.0015));
     }, { passive: false });
@@ -440,10 +457,13 @@ export class MapView {
   }
   fitWorld() { this.view.z = this.minZ * 1.05; this.view.x = (this.map.W - window.innerWidth / this.view.z) / 2; this.view.y = (this.map.H - window.innerHeight / this.view.z) / 2; this.clampView(); }
   clampView() {
-    const vw = window.innerWidth / this.view.z, vh = window.innerHeight / this.view.z;
-    this.view.x = Math.max(0, Math.min(this.map.W - vw, this.view.x));
-    this.view.y = Math.max(0, Math.min(this.map.H - vh, this.view.y));
+    // a little sea past every edge, so land under the side panels can be pulled into view
+    const vw = window.innerWidth / this.view.z, vh = window.innerHeight / this.view.z, mx = vw * 0.3, my = vh * 0.22;
+    this.view.x = Math.max(-mx, Math.min(this.map.W - vw + mx, this.view.x));
+    this.view.y = Math.max(-my, Math.min(this.map.H - vh + my, this.view.y));
   }
+  /** Slide the view by screen pixels. */
+  pan(dx, dy) { if (this.drift) return; this.view.x += dx / this.view.z; this.view.y += dy / this.view.z; this.clampView(); this.dirty = true; }
   centerOn(x, y, z) {
     if (z) this.view.z = Math.max(this.minZ, z);
     this.view.x = x - window.innerWidth / 2 / this.view.z; this.view.y = y - window.innerHeight / 2 / this.view.z;
@@ -570,6 +590,21 @@ function drawBanner(g, x, y, s, t) {
   g.bezierCurveTo(14, 0 - wave, 8, -6 + wave, 0, -4); g.closePath();
   g.fillStyle = '#e8c35a'; g.fill(); g.lineWidth = 1.2; g.stroke();
   g.fillStyle = INK; g.font = 'bold 8px serif'; g.textAlign = 'center'; g.fillText('♛', 9, -7.5);
+  g.restore();
+}
+function drawPlayerTag(g, x, y, s, name, online) {
+  g.save(); g.translate(x, y); g.scale(s, s);
+  g.strokeStyle = INK; g.lineWidth = 1.6; g.lineCap = 'round';
+  g.beginPath(); g.moveTo(0, 14); g.lineTo(0, -16); g.stroke();
+  g.beginPath(); g.moveTo(0, -16); g.lineTo(20, -12); g.lineTo(0, -6); g.closePath();
+  g.fillStyle = '#3d6aa8'; g.fill(); g.lineWidth = 1.1; g.stroke();
+  const label = '👤 ' + name;
+  g.font = 'bold 9px "IM Fell English", serif'; g.textAlign = 'left'; g.textBaseline = 'middle';
+  const w = g.measureText(label).width + 14;
+  g.fillStyle = 'rgba(250,242,220,0.92)'; g.strokeStyle = INK; g.lineWidth = 0.9;
+  g.beginPath(); g.roundRect ? g.roundRect(4, 15, w, 13, 6) : g.rect(4, 15, w, 13); g.fill(); g.stroke();
+  g.fillStyle = online ? '#3f8f3a' : '#9a8f80'; g.beginPath(); g.arc(11, 21.5, 3, 0, Math.PI * 2); g.fill();
+  g.fillStyle = INK; g.fillText(label, 17, 22);
   g.restore();
 }
 function drawRealmLabel(g, m, cells, text, mine) {

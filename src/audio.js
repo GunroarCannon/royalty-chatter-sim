@@ -15,6 +15,11 @@ const buffers = {}, tracks = {}, lastAt = {};
 const vol = (k, d) => { const v = +getOpt(k); return Number.isFinite(v) ? v : d; };
 
 export const isUnlocked = () => unlocked;
+/** Portrait voices (the Atelier's babble): the classic synth, or off with the Voices option or muted sounds. */
+export function applyVoices() {
+  const pm = window.PM;
+  if (pm && pm.voice) { const m = getOpt('voices') !== false && vol('sfxVol', 0.7) > 0 ? 'classic' : 'off'; if (pm.voice.mode !== m) pm.voice.mode = m; }
+}
 export function unlock() {
   if (unlocked) return;
   unlocked = true;

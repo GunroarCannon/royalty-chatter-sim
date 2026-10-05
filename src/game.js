@@ -10,7 +10,7 @@ import { endSeason, reputation } from '../shared/sim.js';
 import { canTalk, ACTIONS, marriageablesOfMine, marriageBlock, marriageChance, keepCost } from '../shared/actions.js';
 import { resolveEvent } from '../shared/events.js';
 import { MapView } from './map/MapView.js';
-import { stillURL, moodExpr } from './portraits.js';
+import { stillURL, moodExpr, liveActor } from './portraits.js';
 import { api, playerId } from './api.js';
 import { h, $, esc, toast, opinionBadge, tipHTML, floatDelta, setLinkifier, typingDots } from './ui/dom.js';
 import { draggable, resetPositions } from './ui/drag.js';
@@ -20,6 +20,7 @@ import { openWar, warBar, warsOf, scoreFor } from './ui/war.js';
 import { openAdvisor } from './ui/advisor.js';
 import { showEvent } from './ui/eventModal.js';
 import { openAudience, sexMark } from './ui/audience.js';
+import { openChat } from './ui/chat.js';
 import { music, musicForPreset, sfx, unlock, installClickSounds } from './audio.js';
 import { openChronicle } from './ui/chronicle.js';
 import { installSketch } from './ui/sketch.js';
@@ -142,19 +143,91 @@ export class Game {
     this.map = this.map && this.map.seed === r.state.seed ? this.map : generateMap(r.state.seed);
     applyProvNames(this.map, r.state);
     this.start(r.state);
-    this.toastInbox();
+    this.toastInbox(!!r.meta.away);
+    this.onMeta(r.meta);
     clearInterval(this.poll);
     this.poll = setInterval(() => this.sync(), 2500);
     clearInterval(this.clock);
     this.clock = setInterval(() => this.renderClock(), 1000);
   }
-  leaveMp() { clearInterval(this.poll); clearInterval(this.clock); this.mp = null; this.pending = null; }
+  leaveMp() { clearInterval(this.poll); clearInterval(this.clock); this.mp = null; this.pending = null; for (const c of Object.values(this.chats || {})) c.close(); this.chats = {}; }
+
+  /** Things the server tells every sync: someone came to talk, or you were away a long time. */
+  onMeta(meta) {
+    if (!this.mp || !meta) return;
+    this.chats = this.chats || {};
+    for (const ch of meta.chats || []) {
+      if (this.chats[ch.id] || !ch.incoming) continue;
+      // don't snatch the keyboard from someone mid-sentence: knock, and open once they finish
+      if (this.isWriting()) { if (this.knocked !== ch.id) { this.knocked = ch.id; toast(`${ch.from} has come to speak with you…`, '💬'); } continue; }
+      this.knocked = null;
+      this.enterChat(ch.id);
+    }
+    if (meta.away && !this.awaySeen) {
+      this.awaySeen = true;
+      const a = meta.away, from = a.y * 4 + a.s;
+      const entries = this.state.chronicle.filter(e => e.y * 4 + e.s >= from);
+      api.worldAct(this.mp.id, 'seenAway', []).catch(() => {});
+      this.showRecap(entries, a.ms);
+    }
+  }
+  async enterChat(id, chat) {
+    this.chats = this.chats || {};
+    if (this.chats[id]) return;
+    this.chats[id] = { close() {} };
+    try {
+      const c = chat || await api.chatGet(id, 0);
+      if (!c.open) { delete this.chats[id]; return; }
+      this.chatting = (this.chatting || 0) + 1;
+      this.chats[id] = openChat(this, c, () => { this.chatting--; setTimeout(() => { delete this.chats[id]; }, 4000); this.sync(); this.processQueue(); });
+    } catch (e) { delete this.chats[id]; }
+  }
+  /** Talk to another player's ruler: face to face if they are online, else their steward (if allowed). */
+  async talkToPlayer(c) {
+    try { const chat = await api.chatStart(this.mp.id, c.id); this.enterChat(chat.id, chat); }
+    catch (e) {
+      if (e.status === 409 && this.state.humans[c.realm] && this.state.humans[c.realm].auto) return this.talk(c.id);
+      toast(e.message, '✖');
+    }
+  }
+  /** True while the player is typing somewhere: popups wait until they are done. */
+  isWriting() {
+    const a = document.activeElement;
+    const typing = a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !/checkbox|radio|range|button/.test(a.type))) && !a.disabled && a.value.trim();
+    return !!typing || Date.now() - (this.lastKey || 0) < 3000;
+  }
+  /** Your AI stand-in: may it answer other players and settle matters while you are away? */
+  standInBox() {
+    const cur = this.mp.meta.auto || { on: true, guide: '' };
+    const on = h('input', { type: 'checkbox' });
+    on.checked = cur.on !== false;
+    const ta = h('textarea.field', { maxlength: 600, rows: 5, placeholder: 'e.g. "Be friendly to Ana but never pay tribute. Accept gifts. Avoid wars unless we are clearly stronger. Speak like a grumpy old king."', style: { width: '100%', resize: 'vertical' } });
+    ta.value = cur.guide || '';
+    const back = h('div.modal-back', null, h('div.panel.options', null, h('div.titlebar', null, '🗣 Your stand-in', h('button.x', { onclick: () => back.remove() }, '✕')),
+      h('div.body', null,
+        h('label.row', { style: { gap: '8px', alignItems: 'center', cursor: 'pointer' } }, on, h('b', null, 'Auto replies')),
+        h('p.muted', { style: { fontSize: '13px' } }, 'While you are away (or silent in a chat), a steward speaks for you to other players and settles the matters on your desk, guided by what you write here. Off: other players can only write you letters while you are away.'),
+        ta,
+        h('div.row', { style: { justifyContent: 'flex-end', marginTop: '10px' } },
+          h('button.btn.dark', { onclick: async () => { back.remove(); await this.action('persona', on.checked, ta.value.trim()); this.renderPanel && this.renderPanel(); } }, 'Save')))));
+    document.body.append(back);
+    draggable(back.firstChild, { handle: back.firstChild.querySelector('.titlebar') });
+  }
+  async renameBox() {
+    const s = this.state, pl = player(s);
+    const inp = h('input.field', { maxlength: 24, style: { width: '100%', marginTop: '8px' } });
+    inp.value = pl.name;
+    inp.addEventListener('keydown', e => e.stopPropagation());
+    const ok = await confirmBox({ title: 'Rename your ruler', icon: '✎', ok: 'So be it', cancel: 'Never mind', text: `What shall ${fullName(s, pl)} be called?`, extra: inp });
+    if (ok && inp.value.trim() && inp.value.trim() !== pl.name) await this.action('rename', inp.value.trim());
+  }
 
   async sync() {
     if (!this.mp || this.syncing) return;
     this.syncing = true;
     try {
       const r = await api.worldView(this.mp.id, this.mp.v);
+      this.onMeta(r.meta);
       if (r.same) { this.mp.meta = r.meta; this.renderClock(); }
       else if (this.modal || this.busy) this.pending = r; // apply once the open window closes
       else this.applyView(r);
@@ -177,10 +250,13 @@ export class Game {
     if (this.state.gameOver) return this.gameOver();
     this.processQueue();
   }
-  toastInbox() {
+  toastInbox(silent) {
     const s = this.state, mp = this.mp;
     if (!mp || !s.inbox) return;
-    for (const n of s.inbox) if (n.id > mp.inbox) { toast(n.text, n.icon); mp.inbox = n.id; }
+    // a burst of old news after a long absence is the recap's job, not forty toasts
+    const fresh = s.inbox.filter(n => n.id > mp.inbox);
+    if (fresh.length > 4 && !silent) { silent = true; toast(`${fresh.length} pieces of news. See the Chronicle.`, '📖'); }
+    for (const n of fresh) { if (!silent) toast(n.text, n.icon); mp.inbox = n.id; }
     try { localStorage.setItem('rb-inbox-' + mp.id, mp.inbox); } catch {}
   }
   applyPending() { if (this.pending && !this.modal) this.applyView(this.pending); }
@@ -212,6 +288,29 @@ export class Game {
     if (!this.map || this.map.seed !== state.seed) this.map = generateMap(state.seed);
     applyProvNames(this.map, state);
     this.start(state);
+    // back after a long break: "previously, in your reign…"
+    const gap = state.lastPlayed ? Date.now() - state.lastPlayed : 0;
+    if (gap > 6 * 3600_000 && state.chronicle.length > 3) setTimeout(() => this.showRecap(state.chronicle.slice(-14), gap, 'Previously, in your reign…'), 900);
+  }
+
+  /** A short paragraph of what happened, written by the chronicler (the list itself if the LLM is out). */
+  showRecap(entries, gap, title = 'While you were away') {
+    if (!entries.length) return;
+    const s = this.state, texts = entries.map(e => `${SEASONS[e.s]} ${e.y}: ${e.text}`);
+    const body = h('div.recap-text', null, typingDots(), ' The chronicler clears his throat…');
+    const more = h('details.recap-more', null, h('summary', null, `All ${entries.length} entries`), entries.slice().reverse().map(e => h('div.entry', null, h('span.y', null, `${SEASONS[e.s]} ${e.y}`), this.link(e.text, e.chars))));
+    const close = () => { back.remove(); this.recapOpen = false; if (!this.modal) this.processQueue(); };
+    this.recapOpen = true;
+    const back = h('div.modal-back', { onclick: e => { if (e.target === back) close(); } }, h('div.panel.dialog.recap', null,
+      ['tl', 'tr', 'bl', 'br'].map(k => h('i.corner.' + k)),
+      h('div.titlebar', null, title),
+      h('div.dialog-body', null, h('div.dialog-seal', null, '📜'), h('div', { style: { flex: 1 } }, body, more)),
+      h('div.dialog-foot', null, h('button.btn.dark', { onclick: close }, 'Carry on'))));
+    document.body.append(back);
+    sfx('bell');
+    api.recap({ ruler: fullName(s, player(s)), realm: playerRealm(s).name, entries: texts, awayMs: gap })
+      .then(r => { body.innerHTML = ''; body.append(r.text ? this.link(r.text) : h('span.muted', null, 'Little of note.')); })
+      .catch(() => { body.innerHTML = ''; body.append(h('span.muted', null, 'The chronicler has lost his spectacles. Here is the list:')); more.open = true; });
   }
 
   start(state) {
@@ -286,6 +385,7 @@ export class Game {
     if (!s || this.mp) return;
     const r = s.reigns[0], last = s.reigns[s.reigns.length - 1];
     const summary = { campaign: s.campaign, dynasty: s.dynasty, realm: playerRealm(s).name, from: r.from, to: s.year, rep: last.rep || reputation(s.stats), rulers: s.reigns.map(x => x.name) };
+    s.lastPlayed = Date.now();
     try { localStorage.setItem('rb-save', JSON.stringify(s)); } catch {}
     try { await api.save(s, summary); } catch (e) { console.warn('save failed', e); }
     this.profile.save = s;
@@ -317,16 +417,23 @@ export class Game {
 
   processQueue() {
     const s = this.state;
-    if (this.modal || !s.queue.length) return;
+    if (!s || this.modal || !s.queue.length) return;
+    const gap = (this.mp ? 3500 : 300) - (Date.now() - (this.lastEventClose || 0));
+    if (this.chatting || this.recapOpen || this.isWriting() || gap > 0) {
+      clearTimeout(this._qWait);
+      this._qWait = setTimeout(() => this.processQueue(), Math.max(gap, 1200));
+      return;
+    }
     this.modal = true;
     showEvent(this, s.queue[0], () => {
       this.modal = false;
+      this.lastEventClose = Date.now();
       const st = this.state;
       if (st.flags.mapDirty) this.view.invalidate();
       if (this.pending) return this.applyView(this.pending);
       this.refresh(); this.flush();
       if (st.gameOver) return this.gameOver();
-      if (st.queue.length) setTimeout(() => this.processQueue(), 200);
+      if (st.queue.length) setTimeout(() => this.processQueue(), this.mp ? 3500 : 300);
       else this.save();
     });
   }
@@ -490,6 +597,7 @@ export class Game {
   idleWatch() {
     if (this._idleOn) return;
     this._idleOn = true;
+    document.addEventListener('keydown', e => { const t = e.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) this.lastKey = Date.now(); }, true);
     const poke = () => { const b = $('.end-btn'); if (b) b.classList.remove('breathe'); clearTimeout(this._idle); this._idle = setTimeout(() => this.idlePulse(), 12000); };
     ['pointerdown', 'keydown', 'wheel'].forEach(ev => document.addEventListener(ev, poke, true));
     poke();
@@ -522,10 +630,10 @@ export class Game {
     const pl = $('#players');
     if (pl) {
       pl.innerHTML = '';
-      pl.append(h('div.pl-head', null, h('span.sc', null, 'Rulers'), m.canForce ? h('button.btn.small', { onclick: () => this.hurrySeason(), 'data-tip': tipHTML('Hurry the season', m.founder ? 'You founded this world, so you may turn the season early.' : 'You are alone here, so you may turn the season early.') }, '⏩ Now') : null));
+      pl.append(h('div.pl-head', null, h('span.sc', null, '👤 Players'), h('button.btn.small', { onclick: () => this.standInBox(), 'data-tip': tipHTML('Your stand-in', 'Auto replies while you are away.') }, '🗣'), m.canForce ? h('button.btn.small', { onclick: () => this.hurrySeason(), 'data-tip': tipHTML('Hurry the season', m.founder ? 'You founded this world, so you may turn the season early.' : 'You are alone here, so you may turn the season early.') }, '⏩ Now') : null));
       for (const p of m.players) {
         const r = this.state.realms[p.realm];
-        pl.append(h('div.court-row', { onclick: () => this.selectChar(r.ruler), 'data-tip': tipHTML(p.name, (p.online ? 'Online' : 'Away: their house answers for them') + '<br>Click to see their ruler') }, armsEl(r),
+        pl.append(h('div.court-row', { onclick: () => this.selectChar(r.ruler), 'data-tip': tipHTML(p.name + ' (a real player)', (p.online ? 'Online: Talk opens a live chat.' : p.auto ? 'Away: their steward answers for them.' : 'Away, auto replies off: letters only.') + '<br>Click to see their ruler') }, armsEl(r),
           h('div.who', null, p.name + (p.me ? ' (you)' : ''), h('br'), h('small', null, r.name)), h('span', { style: { color: p.online ? 'var(--green)' : 'var(--ink-3)' } }, p.online ? '●' : '○')));
       }
     }
@@ -587,7 +695,18 @@ export class Game {
     $('#charpanel').classList.add('open');
     this.renderPanel();
   }
-  closePanel() { this.selected = null; $('#charpanel').classList.remove('open'); this.view.select(null); }
+  closePanel() { this.selected = null; $('#charpanel').classList.remove('open'); this.view.select(null); this.dropLive(); }
+  dropLive() { if (this.cpLive) { this.cpLive.stop(); this.cpLive = null; } }
+  /** The panel portrait: alive and glancing about (kept between redraws), or a still. */
+  panelPortrait(c, expr) {
+    const s = this.state;
+    if (!c.alive || getOpt('livePortraits') === false || !window.PM || !window.PM.Actor) { this.dropLive(); return h('img', { src: stillURL(s, c, 200, expr), style: c.alive ? null : { filter: 'grayscale(1) sepia(.4)' } }); }
+    if (this.cpLive && this.cpLive.id === c.id) { if (this.cpLive.expr !== expr) { this.cpLive.actor.setExpr(expr); this.cpLive.expr = expr; } return this.cpLive.el; }
+    this.dropLive();
+    this.cpLive = Object.assign(liveActor(s, c, 200, expr), { id: c.id, expr });
+    this.cpLive.el.style.width = '100%'; this.cpLive.el.style.display = 'block';
+    return this.cpLive.el;
+  }
 
   renderPanel() {
     const s = this.state, c = s.chars[this.selected];
@@ -602,7 +721,7 @@ export class Game {
 
     const traitEls = c.traits.map(t => h('span.trait', { 'data-tip': `<b>${TRAITS[t].label}</b><br>${esc(TRAITS[t].persona)}${TRAITS[t].op ? `<br>Opinion of you: <span class="${TRAITS[t].op > 0 ? 'pos' : 'neg'}">${TRAITS[t].op > 0 ? '+' : ''}${TRAITS[t].op}</span>` : ''}` }, TRAITS[t].icon + ' ' + TRAITS[t].label));
     body.append(h('div.cp-head', null,
-      h('div.cp-portrait', null, h('img', { src: stillURL(s, c, 200, me ? 'neutral' : c.alive ? moodExpr(op.total) : 'neutral'), style: c.alive ? null : { filter: 'grayscale(1) sepia(.4)' } }), r ? armsEl(r) : null),
+      h('div.cp-portrait', null, this.panelPortrait(c, me ? 'neutral' : c.alive ? moodExpr(op.total) : 'neutral'), r ? armsEl(r) : null),
       h('div', { style: { flex: 1, minWidth: 0 } },
         h('div.cp-name', null, fullName(s, c), ' ', sexMark(c)),
         h('div.cp-title', null, c.alive ? roleLabel(s, c) : `Died ${c.died} of ${c.cause}`),
@@ -621,7 +740,14 @@ export class Game {
 
     // actions
     const acts = h('div.actions');
-    if (c.alive && canTalk(s, c)) acts.append(h('button.btn.dark', { onclick: () => this.talk(c.id), disabled: s.audiences <= 0, 'data-tip': s.audiences > 0 ? tipHTML('Talk', `Speak with ${esc(c.name)} in person. Costs one 🔔 (you have ${s.audiences}). They remember what you say, and may walk out.`) : tipHTML('No bells left', 'End the season to get another 🔔.') }, s.audiences > 0 ? '🔔 Talk' : '🔔 No bells'));
+    const hu = s.humans && r && r.ruler === c.id && s.humans[r.id] && !s.humans[r.id].me ? s.humans[r.id] : null;
+    if (hu && c.alive) {
+      acts.append(hu.online
+        ? h('button.btn.dark', { onclick: () => this.talkToPlayer(c), 'data-tip': tipHTML('Talk face to face', `${esc(hu.name)} is online: a chat opens on their screen at once. Free.`) }, '💬 Talk')
+        : hu.auto
+          ? h('button.btn.dark', { onclick: () => this.talk(c.id), disabled: s.audiences <= 0, 'data-tip': tipHTML('Talk to their steward', `${esc(hu.name)} is away. Their stand-in answers, guided by what they told it. Costs one 🔔.`) }, '🔔 Talk')
+          : h('button.btn', { disabled: true, 'data-tip': tipHTML('Away', `${esc(hu.name)} is away and has auto replies off. Write a letter instead.`) }, '🔔 Talk'));
+    } else if (c.alive && canTalk(s, c)) acts.append(h('button.btn.dark', { onclick: () => this.talk(c.id), disabled: s.audiences <= 0, 'data-tip': s.audiences > 0 ? tipHTML('Talk', `Speak with ${esc(c.name)} in person. Costs one 🔔 (you have ${s.audiences}). They remember what you say, and may walk out.`) : tipHTML('No bells left', 'End the season to get another 🔔.') }, s.audiences > 0 ? '🔔 Talk' : '🔔 No bells'));
     if (c.alive) acts.append(h('button.btn', { onclick: () => this.action('gift', c.id, this.giftAmount()), disabled: s.gold < 25, 'data-tip': tipHTML(`Gift ${this.giftAmount()} gold`, s.gold < 25 ? 'You need at least 25 gold.' : 'They will like you more. Greedy people love it.') }, `💰 Gift ${this.giftAmount()}`));
     const fam = c.alive ? marriageablesOfMine(s).filter(w => !marriageBlock(s, c, w)) : [];
     if (fam.length) acts.append(h('button.btn', { onclick: () => this.proposeMarriage(c, fam), 'data-tip': tipHTML('Propose marriage', fam.map(w => `${w.id === pl.id ? 'You' : esc(w.name)}: ${marriageChance(s, c, w)}% chance`).join('<br>') + (c.realm !== s.playerRealm ? '<br>A foreign match warms their ruler.' : '')) }, '💍 Marry'));
@@ -663,6 +789,9 @@ export class Game {
 
   renderSelf(body) {
     const s = this.state, pl = player(s), pr = playerRealm(s);
+    body.append(h('div.row', { style: { gap: '4px', marginTop: '8px', flexWrap: 'wrap' } },
+      h('button.btn.small', { onclick: () => this.renameBox(), 'data-tip': tipHTML('Rename', 'Change your ruler’s name.') }, '✎ Rename'),
+      this.mp ? h('button.btn.small', { onclick: () => this.standInBox(), 'data-tip': tipHTML('Your stand-in', 'Auto replies while you are away, and what they should say.') }, '🗣 Stand-in: ' + ((this.mp.meta.auto || {}).on === false ? 'off' : 'on')) : null));
     const tabs = h('div.row', { style: { gap: '4px', marginTop: '10px' } },
       ['self', 'court'].map(t => h('button.btn.small' + (this.tab === t ? '.dark' : ''), { onclick: () => { this.tab = t; this.renderPanel(); }, 'data-tip': t === 'self' ? 'Your family, lands, wars and promises' : 'Your council and courtiers' }, t === 'self' ? 'Family & Realm' : 'Court & Council')));
     body.append(tabs);

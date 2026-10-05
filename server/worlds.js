@@ -20,7 +20,8 @@ const mapFor = seed => { if (!maps.has(seed)) maps.set(seed, generateMap(seed));
 
 export const nsMpDyn = (worldId, pid) => `rb-dyn-${pid}-${worldId}`;
 export const nsRoom = worldId => `rb-room-${worldId}`;
-const ONLINE_MS = 75_000;
+export const ONLINE_MS = 75_000;
+const AWAY_MS = 8 * 60_000; // gone this long (and the world moved on) → a "while you were away" recap
 
 function load() {
   for (const f of fs.readdirSync(DIR)) {
@@ -29,6 +30,7 @@ function load() {
       const { meta, state } = JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8'));
       const map = mapFor(state.seed);
       applyProvNames(map, state);
+      state.mp = Object.assign(state.mp || { id: meta.id }, { seasonSecs: meta.seasonSecs });
       worlds.set(meta.id, { meta, state, map, version: 1, dirty: false });
     } catch (e) { console.warn('bad world file', f, e.message); }
   }
@@ -86,7 +88,7 @@ export function createSharedWorld({ name, preset, seasonSecs, maxPlayers, diffic
   const seed = 'mp' + id;
   const map = mapFor(seed);
   const { state } = createWorld(seed, { map, preset: PRESETS[preset] ? preset : 'world', noPlayer: true, settings: { difficulty: ['gentle', 'normal', 'harsh'].includes(difficulty) ? difficulty : 'normal', realms: 'normal', shareWorld: true } });
-  state.mp = { id };
+  state.mp = { id, seasonSecs: Math.max(30, Math.min(900, +seasonSecs || 60)) };
   const meta = {
     id, name: String(name || 'A Shared World').slice(0, 40), preset: state.preset, created: Date.now(),
     seasonSecs: Math.max(30, Math.min(900, +seasonSecs || 60)), maxPlayers: Math.max(2, Math.min(16, +maxPlayers || 8)), nextTick: 0,
@@ -98,7 +100,7 @@ export function createSharedWorld({ name, preset, seasonSecs, maxPlayers, diffic
   return meta;
 }
 
-const getWorld = id => { const w = worlds.get(String(id)); if (!w) throw Object.assign(new Error('No such world'), { status: 404 }); return w; };
+export const getWorld = id => { const w = worlds.get(String(id)); if (!w) throw Object.assign(new Error('No such world'), { status: 404 }); return w; };
 const playerOf = (w, pid) => { const p = w.state.players[pid]; if (!p || p.left) throw Object.assign(new Error('You have no realm in this world'), { status: 403 }); return p; };
 
 /** What the lobby needs to draw the map and the realm list. */
@@ -138,16 +140,19 @@ export function leave(id, pid) {
 export function view(id, pid, since) {
   const w = getWorld(id);
   const p = playerOf(w, pid);
-  p.seen = Date.now();
-  const players = Object.entries(w.state.players).filter(([, q]) => !q.left).map(([qid, q]) => ({ me: qid === pid, name: q.name, realm: q.realm, online: Date.now() - q.seen < ONLINE_MS }));
+  // back after a long time while the seasons kept turning: remember where they left off, for a recap
+  if (p.seen && Date.now() - p.seen > AWAY_MS && p.seenTurn != null && w.state.turn - p.seenTurn >= 2) p.away = { turn: p.seenTurn, y: p.seenY, s: p.seenS, ms: Date.now() - p.seen };
+  p.seen = Date.now(); p.seenTurn = w.state.turn; p.seenY = w.state.year; p.seenS = w.state.season;
+  const players = Object.entries(w.state.players).filter(([, q]) => !q.left).map(([qid, q]) => ({ me: qid === pid, name: q.name, realm: q.realm, online: Date.now() - q.seen < ONLINE_MS, auto: !q.auto || q.auto.on !== false }));
   const founder = !!w.meta.founder && w.meta.founder === pid;
-  const meta = { id, name: w.meta.name, seasonSecs: w.meta.seasonSecs, nextTick: w.meta.nextTick, now: Date.now(), players, version: w.version, founder, canForce: founder || players.filter(q => q.online).length <= 1 };
+  const meta = { id, name: w.meta.name, seasonSecs: w.meta.seasonSecs, nextTick: w.meta.nextTick, now: Date.now(), players, version: w.version, founder, canForce: founder || players.filter(q => q.online).length <= 1,
+    auto: Object.assign({ on: true, guide: '' }, p.auto), away: p.away || null, chats: chatsFor ? chatsFor(id, pid) : [] };
   if (since && +since === w.version) return { same: true, meta };
   const state = withPlayer(w.state, pid, () => {
     const { players: _p, worldOutbox: _w, ...rest } = w.state;
     return JSON.parse(JSON.stringify(rest));
   });
-  state.humans = Object.fromEntries(players.map(q => [q.realm, { name: q.name, online: q.online, me: q.me }]));
+  state.humans = Object.fromEntries(players.map(q => [q.realm, { name: q.name, online: q.online, me: q.me, auto: q.auto }]));
   state.mp = { id };
   return { meta, state };
 }
@@ -163,6 +168,14 @@ export function act(id, pid, action, args) {
     w.meta.nextTick = 0; maybeTick(w);
     return { res: { ok: true, msg: 'You ring the great bell. The season turns.' }, ...view(id, pid) };
   }
+  if (action === 'persona') {
+    // auto replies: may the player's AI stand-in answer talks and settle matters while they are away?
+    const [on, guide] = args || [];
+    p.auto = { on: !!on, guide: String(guide || '').slice(0, 600) };
+    touch(w);
+    return { res: { ok: true, msg: p.auto.on ? 'Your stand-in will speak for you while you are away.' : 'Nobody speaks for you while you are away. Letters only.' }, ...view(id, pid) };
+  }
+  if (action === 'seenAway') { p.away = null; return { res: { ok: true }, ...view(id, pid) }; }
   const fn = ACTIONS[action];
   if (!fn) throw new Error('Unknown action');
   const res = withPlayer(w.state, pid, () => fn(w.state, w.map, ...(args || []))) || {};
@@ -193,7 +206,13 @@ function maybeTick(w) {
   w.meta.nextTick = now + w.meta.seasonSecs * 1000;
   touch(w);
   flushMemory(w);
+  if (tickHook) try { tickHook(w); } catch (e) { console.warn('[worlds] tick hook', e.message); }
 }
+let tickHook = null, chatsFor = null;
+/** server/proxy.js plugs in here: AI stand-ins for away players, and live chats between players. */
+export function setHooks(h) { tickHook = h.tick || null; chatsFor = h.chats || null; }
+export const touchWorld = touch;
+export { flushMemory };
 setInterval(() => { for (const w of worlds.values()) maybeTick(w); }, 2000);
 
 export function worldNames(id, pid) {

@@ -13,14 +13,18 @@ const E = {};
 const def = (id, d) => (E[id] = Object.assign({ id, weight: 1, icon: '📜' }, d));
 
 let uidN = 0;
+/** Optional matters (gossip, gifts, follow-ups) are skipped once this many things wait for the player. */
+export const QUEUE_SOFT = 2;
 export function queueEvent(state, id, cast) {
   state.queue.push({ uid: `${state.turn}-${id}-${++uidN}-${Math.floor(Math.random() * 1e5)}`, id, cast: cast || {}, turn: state.turn });
 }
 
 /** Shared worlds keep turning while you are away: events left unanswered for two seasons resolve themselves. */
 export function autoResolveStale(state, map) {
+  // short seasons: give the player a few real minutes, not just two quick seasons
+  const secs = (state.mp && state.mp.seasonSecs) || 120, wait = Math.max(2, Math.ceil(240 / secs));
   for (const item of state.queue.slice()) {
-    if (item.turn == null || state.turn - item.turn < 2) continue;
+    if (item.turn == null || state.turn - item.turn < wait) continue;
     const e = E[item.id];
     let key = e && e.auto;
     if (!key && e) {
@@ -34,7 +38,13 @@ export function autoResolveStale(state, map) {
 
 export function drawEvents(state, map, rng) {
   const recent = state.flags.recent || (state.flags.recent = {});
-  const n = rng.chance(0.3) ? 2 : 1;
+  // never pile up: no new random matters while two are already waiting, and a second one only on an empty desk
+  if (state.queue.length >= QUEUE_SOFT) return;
+  // short shared-world seasons would bury the player, so random events come at most about every two minutes there
+  const secs = state.mp && state.mp.seasonSecs;
+  if (secs && secs < 120 && state.flags.lastDraw != null && (state.turn - state.flags.lastDraw) * secs < 120) return;
+  state.flags.lastDraw = state.turn;
+  const n = !state.queue.length && rng.chance(0.3) ? 2 : 1;
   for (let k = 0; k < n; k++) {
     const pool = [];
     for (const e of Object.values(E)) {
