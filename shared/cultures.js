@@ -1,6 +1,6 @@
 // Cultures and world presets. A culture gives names, houses, places, ruler titles, court offices and a
 // line of flavour for the LLM; a preset picks which cultures share the map and how the land looks.
-// Humour in Royal Banter comes from personalities and situations, never from the cultures themselves,
+// Humour in Royal Ramble comes from personalities and situations, never from the cultures themselves,
 // so regional presets use real names and titles rather than invented "funny" ones.
 
 const SILLY_HOUSE_A = ['Bean', 'Grey', 'Toast', 'Mudd', 'Gold', 'Crow', 'Thistle', 'Ratface', 'Goose', 'Barrow', 'Wick', 'Pickle', 'Stone', 'Fen', 'Hollow', 'Ash', 'Oak', 'Marrow', 'Bramble', 'Cheese', 'Turnip', 'Badger', 'Wren', 'Hare', 'Lark', 'Pudding'];

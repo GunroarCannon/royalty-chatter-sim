@@ -88,7 +88,7 @@ async function standInReply(ch, who) {
   const si = standIn(w, side.pid), them = ch[who === 'a' ? 'b' : 'a'];
   const talk = ch.lines.slice(-10).map(l => `${l.who === who ? si.ruler : them.rulerName}: ${l.text}`).join('\n');
   const out = await chatJSON([
-    { role: 'system', content: `You are the trusted steward standing in for ${si.ruler}, ruler of ${si.realm} (played by ${si.player}, who has stepped away), in "Royal Banter", a lighthearted medieval court game. Your ruler's traits: ${si.traits || 'unknown'}.${guideLine(si)}
+    { role: 'system', content: `You are the trusted steward standing in for ${si.ruler}, ruler of ${si.realm} (played by ${si.player}, who has stepped away), in "Royal Ramble", a lighthearted medieval court game. Your ruler's traits: ${si.traits || 'unknown'}.${guideLine(si)}
 Reply in character in 1–2 short sentences (under 45 words), witty and PG. Speak as the ruler's household ("my liege is occupied, but…"). Make no binding promises; say you will "put it to the ruler". Never mention AI or games.
 JSON only: {"line": "..."}` },
     { role: 'user', content: `${them.rulerName} (ruler of ${them.realmName}) is speaking with your ruler's court:\n${talk}\n\nAnswer ${them.rulerName}.` },
@@ -145,7 +145,7 @@ async function decide(w, pid) {
   }).filter(Boolean));
   if (!items.length) return;
   const out = await chatJSON([
-    { role: 'system', content: `You are the trusted steward of ${si.ruler}, ruler of ${si.realm}, in "Royal Banter", a lighthearted medieval court game. Your ruler (played by ${si.player}) is away, so you settle the matters on their desk as they would. Ruler's traits: ${si.traits || 'unknown'}.${guideLine(si)}
+    { role: 'system', content: `You are the trusted steward of ${si.ruler}, ruler of ${si.realm}, in "Royal Ramble", a lighthearted medieval court game. Your ruler (played by ${si.player}) is away, so you settle the matters on their desk as they would. Ruler's traits: ${si.traits || 'unknown'}.${guideLine(si)}
 Without guidance, be sensible: protect the treasury and the realm, keep promises, avoid needless wars, be polite to strong neighbours.
 For an option marked "writes", you may write a short reply letter (1–2 sentences, in the ruler's voice, witty, no binding promises).
 JSON only: {"choices": [{"uid": "...", "key": "...", "letter": "only for a 'writes' option"}]}` },

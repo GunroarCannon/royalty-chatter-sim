@@ -1,4 +1,4 @@
-// Royal Banter API: saves, Walrus memory, and character audiences (LLM + memory).
+// Royal Ramble API: saves, Walrus memory, and character audiences (LLM + memory).
 import 'dotenv/config';
 import { mirror } from './store.js'; // first: restores the data folder from Redis on free hosts
 import express from 'express';
@@ -155,7 +155,7 @@ function systemPrompt(ctx, fate, mem) {
   const setting = ctx.setting ? `
 SETTING: ${ctx.setting}. Your court: ${ctx.culture && ctx.culture.court}. Use fitting titles, food, customs and proverbs naturally. The comedy comes from personalities and situations; never mock or stereotype any culture.` : (ctx.culture && ctx.culture.court ? `
 Your court: ${ctx.culture.court}.` : '');
-  return `You are roleplaying ${c.name}${c.house ? ' of House ' + c.house : ''}, ${c.title}, ${c.sex === 'f' ? 'a woman' : 'a man'} of ${c.age}${ctx.culture && ctx.culture.label ? ` (${ctx.culture.label})` : ''}, in "Royal Banter", a lighthearted medieval court game (Crusader Kings meets Monty Python; PG, witty, warm, a bit absurd).${setting}
+  return `You are roleplaying ${c.name}${c.house ? ' of House ' + c.house : ''}, ${c.title}, ${c.sex === 'f' ? 'a woman' : 'a man'} of ${c.age}${ctx.culture && ctx.culture.label ? ` (${ctx.culture.label})` : ''}, in "Royal Ramble", a lighthearted medieval court game (Crusader Kings meets Monty Python; PG, witty, warm, a bit absurd).${setting}
 
 STYLE: Stay fully in character. Reply in 1–3 short sentences (under 60 words). Vivid, funny, period-flavoured but easy to read. Never mention AI, games, numbers, stats, "opinion" or "memory systems". Use the ruler's title when addressing them.
 

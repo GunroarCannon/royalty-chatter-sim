@@ -1,4 +1,4 @@
-# Royal Banter: one container serves the game (Vite build) and the API.
+# Royal Ramble: one container serves the game (Vite build) and the API.
 # Build from a checkout that includes the portrait submodule (git clone --recurse-submodules).
 FROM node:22-slim AS build
 WORKDIR /app

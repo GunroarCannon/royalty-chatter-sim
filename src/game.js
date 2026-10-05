@@ -32,8 +32,11 @@ import { openLobby, pickRealm } from './ui/lobby.js';
 
 const CROWN_SVG = '<svg class="crown" viewBox="0 0 70 44"><g fill="#d4ac34" stroke="#2a1d10" stroke-width="2" stroke-linejoin="round" filter="url(#rough2)"><path d="M6 38 L4 10 L20 24 L35 4 L50 24 L66 10 L64 38 Z"/><path d="M6 38 H64 V43 H6Z" fill="#a8302a"/></g><g fill="#f1e8d0" stroke="#2a1d10" stroke-width="1.4"><circle cx="4" cy="9" r="3"/><circle cx="35" cy="4" r="3.4"/><circle cx="66" cy="9" r="3"/></g></svg>';
 
+export const name = 'Royal Ramble';
+
 export class Game {
   constructor() {
+    this.name = name;
     this.state = null; this.map = null; this.view = null; this.selected = null; this.busy = false; this.modal = false;
     this.mp = null; // { id, v, meta, skew } when playing in a shared world
   }
@@ -49,7 +52,7 @@ export class Game {
     boot.innerHTML = '';
     boot.removeAttribute('style');
     boot.className = 'modal-back';
-    boot.append(h('div.panel.title-screen.boot-card', null, ['tl', 'tr', 'bl', 'br'].map(c => h('i.corner.' + c)), h('h1', { html: CROWN_SVG + 'Royal Banter' }), status));
+    boot.append(h('div.panel.title-screen.boot-card', null, ['tl', 'tr', 'bl', 'br'].map(c => h('i.corner.' + c)), h('h1', { html: CROWN_SVG + name }), status));
     this.backdrop();
     let profile = null, health = null;
     try { [profile, health] = await Promise.all([api.profile(), api.health()]); } catch (e) { console.warn(e); }
@@ -104,7 +107,7 @@ export class Game {
     const mem = this.health && this.health.memory && this.health.memory.enabled;
     const back = h('div.modal-back.clear', null, h('div.panel.title-screen', null,
       ['tl', 'tr', 'bl', 'br'].map(c => h('i.corner.' + c)),
-      h('h1', { html: CROWN_SVG + 'Royal Banter' }),
+      h('h1', { html: CROWN_SVG + name }),
       h('div.tag', null, 'Make promises. Break them. See who remembers.'),
       h('hr.orn'),
       h('p', null, 'Every character remembers what you say.', mem ? null : h('span.muted', null, ' (Memory is offline right now.)')),
