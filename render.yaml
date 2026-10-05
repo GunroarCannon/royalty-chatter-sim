@@ -3,7 +3,7 @@
 # Secrets are set in the dashboard, never here.
 services:
   - type: web
-    name: royal-banter
+    name: royal-ramble
     runtime: docker
     plan: free
     healthCheckPath: /api/health
