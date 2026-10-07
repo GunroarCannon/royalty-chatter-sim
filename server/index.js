@@ -106,7 +106,7 @@ app.post('/api/worlds', wrap(req => {
 app.get('/api/worlds/:id/public', wrap(req => publicWorld(req.params.id)));
 app.post('/api/worlds/:id/join', wrap(req => join(req.params.id, cleanPid(req.body.pid), req.body.realm, req.body.name)));
 app.post('/api/worlds/:id/leave', wrap(req => leave(req.params.id, cleanPid(req.body.pid))));
-app.get('/api/worlds/:id/view', wrap(req => view(req.params.id, cleanPid(req.query.pid), req.query.v)));
+app.get('/api/worlds/:id/view', wrap(req => view(req.params.id, cleanPid(req.query.pid), req.query.v, req.query.busy === '1')));
 app.post('/api/worlds/:id/act', wrap(req => {
   const pid = cleanPid(req.body.pid);
   if (!take('act:' + pid, 240, 60_000)) throw Object.assign(new Error('Slow down, your majesty.'), { status: 429 });

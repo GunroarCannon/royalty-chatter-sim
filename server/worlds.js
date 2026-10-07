@@ -137,9 +137,10 @@ export function leave(id, pid) {
 }
 
 /** The world as one player sees it: their view mounted, other players' private data removed. */
-export function view(id, pid, since) {
+export function view(id, pid, since, busy) {
   const w = getWorld(id);
   const p = playerOf(w, pid);
+  if (busy === true) p.busyUntil = Date.now() + 7000; else if (busy === false) p.busyUntil = 0; // in a dialog or popup (the page reports it with each poll)
   // back after a long time while the seasons kept turning: remember where they left off, for a recap
   if (p.seen && Date.now() - p.seen > AWAY_MS && p.seenTurn != null && w.state.turn - p.seenTurn >= 2) p.away = { turn: p.seenTurn, y: p.seenY, s: p.seenS, ms: Date.now() - p.seen };
   p.seen = Date.now(); p.seenTurn = w.state.turn; p.seenY = w.state.year; p.seenS = w.state.season;
@@ -198,7 +199,10 @@ function maybeTick(w) {
   const now = Date.now();
   const live = Object.values(w.state.players).filter(p => !p.left && w.state.realms[p.realm].alive);
   const online = live.filter(p => now - p.seen < ONLINE_MS);
-  if (!online.length) { if (w.meta.nextTick) w.meta.nextTick = Math.max(w.meta.nextTick, now + 5000); return; } // paused while empty
+  if (!online.length) { if (w.meta.nextTick) w.meta.nextTick = Math.max(w.meta.nextTick, now + 5000); w.lastCheck = now; return; } // paused while empty
+  // one player alone, reading a popup or talking: the sand runs three times slower
+  if (online.length === 1 && online[0].busyUntil > now && w.lastCheck && w.meta.nextTick) w.meta.nextTick += Math.round((now - w.lastCheck) * 2 / 3);
+  w.lastCheck = now;
   if (now < w.meta.nextTick) return;
   try {
     endSeason(w.state, w.map);

@@ -31,7 +31,7 @@ export const api = {
   worldPublic: id => req(`/api/worlds/${id}/public`),
   joinWorld: (id, realm, name) => req(`/api/worlds/${id}/join`, { pid: playerId, realm, name }),
   leaveWorld: id => req(`/api/worlds/${id}/leave`, { pid: playerId }),
-  worldView: (id, v) => req(`/api/worlds/${id}/view?pid=${playerId}${v ? '&v=' + v : ''}`),
+  worldView: (id, v, busy) => req(`/api/worlds/${id}/view?pid=${playerId}${v ? '&v=' + v : ''}${busy ? '&busy=1' : ''}`),
   worldAct: (id, action, args) => req(`/api/worlds/${id}/act`, { pid: playerId, action, args }),
   chatStart: (worldId, charId) => req(`/api/worlds/${worldId}/chat`, { pid: playerId, charId }),
   chatGet: (id, since) => req(`/api/chat/${id}?pid=${playerId}&since=${since || 0}`),

@@ -257,15 +257,15 @@ export class Game {
     if (!this.mp || this.syncing) return;
     this.syncing = true;
     try {
-      const r = await api.worldView(this.mp.id, this.mp.v);
+      const r = await api.worldView(this.mp.id, this.mp.v, !!(this.modal || this.audience || this.chatting || this.recapOpen));
       this.onMeta(r.meta);
       if (r.same) { this.mp.meta = r.meta; this.renderClock(); }
-      else if (this.modal || this.busy) this.pending = r; // apply once the open window closes
+      else if (this.modal || this.audience || this.busy) this.pending = r; // apply once the open window closes
       else this.applyView(r);
     } catch (e) { if (e.status === 403) { toast(e.message, '✖'); this.toTitle(); } }
     finally { this.syncing = false; }
   }
-  applyView(r) {
+  applyView(r, noQueue) {
     if (!this.mp || !r || !r.state) return;
     const prevOwner = this.state && this.state.owner.join(',');
     const before = this.state && this.state.turn !== r.state.turn ? this.snapshot() : null;
@@ -279,7 +279,7 @@ export class Game {
     if (before) this.ledger(before, this.snapshot());
     this.toastInbox();
     if (this.state.gameOver) return this.gameOver();
-    this.processQueue();
+    if (!noQueue) this.processQueue();
   }
   toastInbox(silent) {
     const s = this.state, mp = this.mp;
@@ -312,10 +312,7 @@ export class Game {
     }
     try {
       const r = await api.worldAct(this.mp.id, name, args);
-      const wasModal = this.modal;
-      this.modal = false;
-      this.applyView(r);
-      this.modal = wasModal;
+      this.applyView(r, !!this.modal); // a window is open: its own closing brings the next popup, never on top of it
       if (name !== 'resolve' && name !== 'audience') this.act(r.res);
       return r.res;
     } catch (e) { toast(e.message, '✖'); return { ok: false, msg: e.message }; }

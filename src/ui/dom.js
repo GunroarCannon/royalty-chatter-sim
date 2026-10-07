@@ -76,7 +76,7 @@ document.body.append(toasts);
 const TOAST_KIND = { '💰': 'gold', '⚔': 'war', '🏳': 'war', '💥': 'war', '✝': 'grey', '👑': 'gold', '🤝': 'good', '💍': 'good', '✔': 'good', '✖': 'bad', '🕊': 'good' };
 export function toast(text, icon = '📜', ms, ids) {
   if (!ms) ms = Math.max(2600, Math.min(4800, 1800 + String(text).length * 32)); // short news goes quickly; click a toast to dismiss it
-  const t = h('div.toast.' + (TOAST_KIND[icon] || 'plain'), null, h('span.toast-icon', null, icon), h('span', null, linkText(text, ids)));
+  const t = h('div.toast.' + (TOAST_KIND[icon] || 'plain'), null, h('span.toast-icon', null, icon), h('span.toast-text', null, linkText(text, ids)), h('button.toast-x', { 'data-tip': 'Dismiss', onclick: e => { e.stopPropagation(); clearTimeout(timer); out(); } }, '✕'));
   toasts.append(t);
   while (toasts.children.length > 5) toasts.firstChild.remove();
   let timer = setTimeout(out, ms);
