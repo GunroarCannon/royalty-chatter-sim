@@ -20,6 +20,8 @@ function index(game, ids) {
   for (const r of s.realms) { const ru = s.chars[r.ruler]; if (ru) add(fullName(s, ru), 'c:' + ru.id); }
   for (const c of Object.values(s.chars)) if (c.realm === s.playerRealm && c.alive && c.house) add(`${c.name} ${c.house}`, 'c:' + c.id);
   for (const r of s.realms) add(r.name, 'r:' + r.id);
+  const me = s.realms[s.playerRealm] && player(s);
+  if (me) { add(fullName(s, me), 'c:' + me.id); add(`${me.name} ${me.house || ''}`.trim(), 'c:' + me.id); add(me.name, 'c:' + me.id); }
   for (const c of ctx) add(c.name, 'c:' + c.id);
   // short first names are only linked for your own court and foreign rulers (and context), to limit mix-ups
   for (const c of Object.values(s.chars)) if (c.alive && c.realm === s.playerRealm && c.court) add(c.name, 'c:' + c.id);
@@ -48,7 +50,8 @@ export function linkify(game, text, ids) {
 }
 
 export function nameLink(game, label, ref) {
-  const el = h('span.nm', { 'data-tip': ref[0] === 'r' ? 'Click: this realm and you' : 'Click: who is this?' }, label);
+  const you = game.state && game.state.realms[game.state.playerRealm] && ref === 'c:' + player(game.state).id;
+  const el = h('span.nm', { 'data-tip': ref[0] === 'r' ? 'Click: this realm and you' : you ? 'That is you!' : 'Click: who is this?' }, label, you ? h('span.you', null, ' (you)') : null);
   el.addEventListener('click', e => { e.stopPropagation(); relCard(game, ref, e); });
   return el;
 }
@@ -57,10 +60,14 @@ export function nameLink(game, label, ref) {
 export function relationOf(game, c) {
   const s = game.state, pl = player(s), out = [];
   if (c.id === pl.id) return ['You'];
-  if (c.spouse === pl.id) out.push('Your spouse');
-  if (c.parents && c.parents.includes(pl.id)) out.push(c.role === 'heir' ? 'Your heir' : `Your ${c.sex === 'm' ? 'son' : 'daughter'}`);
-  if (pl.parents && pl.parents.includes(c.id)) out.push('Your parent');
+  if (c.spouse === pl.id) out.push(`Your ${c.sex === 'm' ? 'husband' : 'wife'}`);
+  if (c.parents && c.parents.includes(pl.id)) out.push(c.role === 'heir' ? `Your heir (${c.sex === 'm' ? 'son' : 'daughter'})` : `Your ${c.sex === 'm' ? 'son' : 'daughter'}`);
+  if (pl.parents && pl.parents.includes(c.id)) out.push(`Your ${c.sex === 'm' ? 'father' : 'mother'}`);
+  if (pl.parents && c.parents && c.id !== pl.id && pl.parents.some(p => c.parents.includes(p))) out.push(`Your ${c.sex === 'm' ? 'brother' : 'sister'}`);
   if (c.spouse && s.chars[c.spouse] && (pl.children || []).includes(c.spouse)) out.push(`Married to your ${s.chars[c.spouse].sex === 'm' ? 'son' : 'daughter'}`);
+  // grandchildren and nieces/nephews
+  if (c.parents && c.parents.some(p => s.chars[p] && (pl.children || []).includes(p))) out.push(`Your grand${c.sex === 'm' ? 'son' : 'daughter'}`);
+  if (c.parents && pl.parents && c.parents.some(p => s.chars[p] && s.chars[p].parents && s.chars[p].parents.some(q => pl.parents.includes(q)) && p !== pl.id)) out.push(`Your ${c.sex === 'm' ? 'nephew' : 'niece'}`);
   const r = s.realms[c.realm];
   if (r && r.id === s.playerRealm && !out.length) out.push(c.court ? 'Of your court' : 'Your subject');
   if (r && r.id !== s.playerRealm) {

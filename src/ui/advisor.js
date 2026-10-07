@@ -126,7 +126,7 @@ export function openAdvisor(game) {
       for (const p of openPromisesTo(s, c.id).slice(0, 1)) out.push(keepBtn(p));
       const fam = marriageablesOfMine(s).filter(w => !marriageBlock(s, c, w));
       if (fam.length && inList('marry', ref)) out.push(btn('💍 Propose', tipHTML('Propose marriage'), () => { close(); game.proposeMarriage(c, fam); }));
-      if (inList('haters', ref) || inList('friends', ref) || inList('gold', ref)) out.push(btn(`💰 Gift ${game.giftAmount()}`, tipHTML('Send a gift', 'They will like you more.'), () => game.action('gift', c.id, game.giftAmount()), s.gold < 25));
+      if (inList('haters', ref) || inList('friends', ref) || inList('gold', ref)) out.push(s.gold < 5 ? btn('🌼 Flowers', tipHTML('Wild flowers', 'Free. A small token.'), () => game.action('flowers', c.id), false) : btn(`💰 Gift ${game.giftAmount()}`, tipHTML('Send a gift', 'They will like you more.'), () => game.action('gift', c.id, game.giftAmount()), false));
       out.push(talkBtn(c));
     } else if (k === 'w') {
       out.push(btn('🕊 Offer peace', tipHTML('Offer peace'), () => game.action('peace', id)));

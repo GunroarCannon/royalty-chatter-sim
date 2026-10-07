@@ -8,10 +8,11 @@ import { draggable } from './drag.js';
 
 export function openChronicle(game, tab = 'chronicle') {
   const s = game.state;
+  game.chronSeen = s.chronicle.length; const cb = document.getElementById('btn-chron'); if (cb) cb.classList.remove('unread');
   const pages = h('div.pages');
   const tabs = h('div.tabs');
-  const TABS = [['chronicle', '📖 Chronicle'], ['promises', '🤞 Promises'], ['reigns', '👑 Reigns'], ['tales', '🦭 Tales from afar']];
-  const TIPS = { chronicle: 'Everything that happened, newest first. Click a name.', promises: 'Your word, and whether you kept it.', reigns: 'Every ruler of your house, and how history judges them.', tales: 'Stories from other players\' realms (shared Walrus memory).' };
+  const TABS = [['chronicle', '📖 Chronicle'], ['recent', '🕰 Recent'], ['promises', '🤞 Promises'], ['reigns', '👑 Reigns'], ['tales', '🦭 Tales from afar']];
+  const TIPS = { chronicle: 'Everything that happened, newest first. Click a name.', recent: 'The people you last spoke to or dealt with.', promises: 'Your word, and whether you kept it.', reigns: 'Every ruler of your house, and how history judges them.', tales: 'Stories from other players\' realms (shared Walrus memory).' };
   const show = t => {
     tab = t;
     tabs.innerHTML = '';
@@ -22,6 +23,18 @@ export function openChronicle(game, tab = 'chronicle') {
       for (const e of s.chronicle.slice().reverse()) {
         if (e.y !== year) { year = e.y; pages.append(h('div.year-h', null, `Anno ${year}`)); }
         pages.append(h('div.entry.' + e.kind, null, h('span.y', null, SEASONS[e.s]), game.link(e.text, e.chars)));
+      }
+    } else if (t === 'recent') {
+      pages.classList.add('single');
+      let list = [];
+      try { list = JSON.parse(localStorage.getItem('rb-recent:' + s.seed) || '[]'); } catch {}
+      list = list.filter(x => s.chars[x.id]);
+      if (!list.length) pages.append(h('p.muted', null, 'You have not dealt with anyone yet. Talk to someone, send a gift.'));
+      const WHAT = { talk: 'Spoke with', gift: 'Gave a gift to', imprison: 'Imprisoned', release: 'Released', execute: 'Executed', banish: 'Banished', dismiss: 'Dismissed', keep: 'Kept your word to', letter: 'Wrote to' };
+      for (const x of list) {
+        const c = s.chars[x.id];
+        pages.append(h('div.entry', { style: { cursor: 'pointer' }, onclick: () => { back.remove(); game.selectChar(c.id); } },
+          h('span.y', null, `${SEASONS[x.s]} ${x.y}`), `${WHAT[x.what] || 'Dealt with'} `, h('b', null, fullName(s, c)), c.alive ? '' : ' (dead)'));
       }
     } else if (t === 'promises') {
       pages.classList.add('single');

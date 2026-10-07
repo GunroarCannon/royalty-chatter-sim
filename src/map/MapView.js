@@ -455,7 +455,7 @@ export class MapView {
     if (this.view.z < this.minZ) this.view.z = this.minZ;
     this.clampView(); this.dirty = true;
   }
-  fitWorld() { this.view.z = this.minZ * 1.05; this.view.x = (this.map.W - window.innerWidth / this.view.z) / 2; this.view.y = (this.map.H - window.innerHeight / this.view.z) / 2; this.clampView(); }
+  fitWorld() { this.view.z = this.minZ * 1.05; this.view.x = (this.map.W - window.innerWidth / this.view.z) / 2; this.view.y = (this.map.H - window.innerHeight / this.view.z) / 2; this.clampView(); this.dirty = true; }
   clampView() {
     // a little sea past every edge, so land under the side panels can be pulled into view
     const vw = window.innerWidth / this.view.z, vh = window.innerHeight / this.view.z, mx = vw * 0.3, my = vh * 0.22;

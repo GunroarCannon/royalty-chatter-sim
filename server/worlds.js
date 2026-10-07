@@ -82,12 +82,12 @@ export function listWorlds(pid) {
   }).sort((a, b) => (b.mine ? 1 : 0) - (a.mine ? 1 : 0) || b.online - a.online || b.created - a.created);
 }
 
-export function createSharedWorld({ name, preset, seasonSecs, maxPlayers, difficulty }, founder) {
+export function createSharedWorld({ name, preset, seasonSecs, maxPlayers, difficulty, entropy }, founder) {
   if (worlds.size >= 200) throw new Error('Too many worlds on this server.');
   const id = crypto.randomBytes(4).toString('hex');
   const seed = 'mp' + id;
   const map = mapFor(seed);
-  const { state } = createWorld(seed, { map, preset: PRESETS[preset] ? preset : 'world', noPlayer: true, settings: { difficulty: ['gentle', 'normal', 'harsh'].includes(difficulty) ? difficulty : 'normal', realms: 'normal', shareWorld: true } });
+  const { state } = createWorld(seed, { map, preset: PRESETS[preset] ? preset : 'world', noPlayer: true, settings: { difficulty: ['gentle', 'normal', 'harsh'].includes(difficulty) ? difficulty : 'normal', realms: 'normal', shareWorld: true, entropy: Math.max(0, Math.min(100, Number.isFinite(+entropy) ? Math.round(+entropy) : 35)) } });
   state.mp = { id, seasonSecs: Math.max(30, Math.min(900, +seasonSecs || 60)) };
   const meta = {
     id, name: String(name || 'A Shared World').slice(0, 40), preset: state.preset, created: Date.now(),

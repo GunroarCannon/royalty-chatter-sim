@@ -605,3 +605,87 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none;
 .recap .recap-more { max-height: 34vh; overflow-y: auto; }
 .recap .recap-more .entry { font-size: 13px; margin: 4px 0; }
 .recap .recap-more .y { color: var(--ink-3); margin-right: 6px; font-size: 12px; }
+
+/* ---------- readable fonts (default); Options can switch back to the old hand-lettered look ---------- */
+:root {
+  --serif: 'Lora', 'Palatino Linotype', Georgia, serif;
+  --sc: 'Cinzel', 'Lora', Georgia, serif;
+  --hand: 'Patrick Hand', 'Lora', sans-serif;
+}
+body.font-classic {
+  --serif: 'IM Fell English', 'Palatino Linotype', Georgia, serif;
+  --sc: 'IM Fell English SC', 'IM Fell English', Georgia, serif;
+  --hand: 'Kalam', 'IM Fell English', cursive;
+}
+body:not(.font-classic) .titlebar { letter-spacing: 0.02em; }
+body:not(.font-classic) .title-screen h1 { letter-spacing: 0.01em; }
+
+/* ---------- you, relationships, mood ---------- */
+.you { color: var(--gold-2); font-style: italic; font-size: 0.88em; }
+.medal-wrap.foe > span:last-child { color: var(--red); }
+.medal-wrap.fond > span:last-child { color: var(--green); }
+.aud-info .rel-line { margin: 1px 0 2px; }
+#res-mood .ic { filter: none; }
+
+/* ---------- audiences no longer freeze the world (desktop): the rest stays clickable, disruptive buttons grey out ---------- */
+@media (min-width: 761px) {
+  .modal-back.aud-back { background: none; pointer-events: none; justify-content: center; z-index: 220; }
+  .modal-back.aud-back > .panel { pointer-events: auto; }
+  body.aud-open #topbar, body.aud-open #menu { z-index: 50; } /* the dialog (and its close button) sits above the stats bar */
+  .pay-row { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin: 6px 0 2px; }
+  .pay-row .keep-btn { margin: 0; }
+  body.aud-open .end-btn { opacity: 0.5; }
+}
+
+/* ---------- phones: nothing should fall off the screen ---------- */
+@media (max-width: 760px) {
+  html, body { overflow-x: hidden; }
+  .modal-back > .panel { max-width: 100%; }
+  .book { height: auto; max-height: calc(100dvh - 12px); }
+  .setup { max-height: calc(100dvh - 12px); }
+  .setup-body { gap: 12px; padding: 0 14px 14px; }
+  .setup-right { min-width: 0; }
+  .options .body { padding: 0 16px; }
+  .opt-row .lbl { width: auto; min-width: 86px; }
+  .opt-row input[type=range] { min-width: 0; }
+  .presets { grid-template-columns: 1fr 1fr; gap: 6px; }
+  .preset .pd { display: none; }
+  .actions { grid-template-columns: 1fr 1fr; gap: 5px; }
+  .actions .btn { font-size: 13px; padding: 6px 6px; text-align: center; }
+  #topbar { flex-wrap: wrap; gap: 0 4px; }
+  #topbar .res small { display: none; }
+  .tut-card { max-width: calc(100vw - 20px); }
+  .event { width: 100%; }
+  .war-sides { gap: 4px; }
+  .wl-row { font-size: 12px; }
+  #charpanel .body { padding: 4px 12px 14px; }
+  .cp-name { font-size: 19px; }
+  .stats { gap: 2px; }
+  .lg-row { font-size: 14px; }
+}
+@media (max-width: 760px) {
+  #topbar { flex-wrap: nowrap; gap: 0; padding: 5px 4px; overflow: hidden; }
+  #topbar .res { font-size: 14px; padding: 2px 5px; gap: 3px; min-width: 0; }
+  #topbar .res .ic { font-size: 14px; }
+}
+
+/* a blink when someone joins, leaves or comes online */
+#players.ping { animation: plping 1.6s ease-out 1; }
+@keyframes plping { 0% { box-shadow: 0 0 0 0 rgba(63,143,58,0.9); } 100% { box-shadow: 0 0 0 16px rgba(63,143,58,0); } }
+/* unread light on the chronicle button */
+#btn-chron.unread::after { content: ''; position: absolute; top: 2px; right: 2px; width: 9px; height: 9px; border-radius: 50%; background: var(--gold-2, #d8a431); box-shadow: 0 0 6px 2px rgba(216,164,49,0.8); animation: chronlight 1.6s ease-in-out infinite; }
+@keyframes chronlight { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.45; transform: scale(0.8); } }
+#btn-chron { position: relative; }
+
+.recap .recap-status { font-family: var(--hand); color: var(--ink-3); font-size: 14px; margin-bottom: 8px; }
+.save-row .btn:first-child { text-align: left; }
+
+/* continue page */
+.continue { width: 520px; max-width: 96vw; }
+.continue-list { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; padding: 2px; }
+.save-card { display: flex; align-items: stretch; gap: 8px; border: 1.6px solid var(--ink-3, #6b5a44); border-radius: 6px; background: rgba(255, 250, 235, 0.45); }
+.save-main { flex: 1; min-width: 0; padding: 9px 12px; cursor: pointer; }
+.save-main:hover { background: rgba(160, 60, 40, 0.08); }
+.save-title { font-size: 19px; }
+.save-main .last { color: var(--red); font-family: var(--hand); }
+.save-go { display: flex; flex-direction: column; justify-content: center; gap: 6px; padding: 8px 10px 8px 0; }

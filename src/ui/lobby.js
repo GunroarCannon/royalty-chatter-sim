@@ -20,7 +20,7 @@ const modal = (title, body, onClose, cls = 'setup') => {
 export function openLobby(game, onCancel) {
   const list = h('div', { style: { flex: 1, minWidth: 0 } }, h('p.note', null, 'Looking for worlds…'));
   const nameIn = h('input.field', { value: getOpt('name') || '', maxlength: 24, placeholder: 'Your name', oninput: e => setOpt('name', e.target.value.trim()) });
-  const cfg = { preset: 'world', seasonSecs: 60, difficulty: 'normal' };
+  const cfg = { preset: 'world', seasonSecs: 60, difficulty: 'normal', entropy: 35 };
   const seg = (key, choices) => {
     const wrap = h('span.seg');
     const paint = () => { wrap.innerHTML = ''; for (const [v, l] of choices) wrap.append(h('button.btn.small' + (cfg[key] === v ? '.on' : ''), { onclick: () => { cfg[key] = v; paint(); } }, l)); };
@@ -33,9 +33,10 @@ export function openLobby(game, onCancel) {
     h('div.opt-row', null, h('select.field', { onchange: e => { cfg.preset = e.target.value; } }, Object.entries(PRESETS).map(([id, p]) => h('option', { value: id }, `${p.label}`)))),
     h('div.opt-row', null, h('span.lbl', null, 'Season'), seg('seasonSecs', [[30, '30 s'], [60, '1 min'], [120, '2 min'], [300, '5 min']])),
     h('div.opt-row', null, h('span.lbl', null, 'Difficulty'), seg('difficulty', [['gentle', 'Gentle'], ['normal', 'Normal'], ['harsh', 'Harsh']])),
+    h('div.opt-row', { 'data-tip': 'Chaos: more happens to everyone, and bigger things.' }, h('span.lbl', null, 'Chaos'), h('input', { type: 'range', min: 0, max: 100, step: 5, value: cfg.entropy, style: { flex: 1 }, oninput: e => { cfg.entropy = +e.target.value; } })),
     h('button.btn.dark', { style: { textAlign: 'center' }, onclick: async () => {
       try {
-        const w = await api.createWorld({ name: worldName.value.trim() || `${(getOpt('name') || 'A')}'s World`, preset: cfg.preset, seasonSecs: cfg.seasonSecs, difficulty: cfg.difficulty });
+        const w = await api.createWorld({ name: worldName.value.trim() || `${(getOpt('name') || 'A')}'s World`, preset: cfg.preset, seasonSecs: cfg.seasonSecs, difficulty: cfg.difficulty, entropy: cfg.entropy });
         m.close(); pickRealm(game, w.id, () => openLobby(game, onCancel));
       } catch (e) { toast(e.message, '✖'); }
     } }, '🏰 Found it'),

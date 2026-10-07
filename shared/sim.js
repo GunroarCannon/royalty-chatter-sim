@@ -4,7 +4,7 @@ import { RNG, clamp } from './rng.js';
 import {
   player, playerRealm, provincesOf, record, addMod, heirOf, refreshRoles, maxLevies, income, fullName, shortName, ageOf,
   makeChar, atWar, allied, neighborsOfRealm, council, COUNCIL, opinionOf, dateStr, roleLabel, SEASONS, TRAITS,
-  withPlayer, forHuman, isHumanRealm, humanPid,
+  withPlayer, forHuman, isHumanRealm, humanPid, chaosMult, moodParts, omensOf, OMENS, omenSum, bumpBoth, regard, lifeNote,
 } from './world.js';
 import { houseName, randomCulture, EPITHETS } from './names.js';
 import { DIFFICULTY } from './world.js';
@@ -38,6 +38,7 @@ export function endSeason(state, map) {
 function worldPhase(state, map, rng) {
   for (const r of state.realms) if (r.alive && !isHumanRealm(state, r.id)) r.levies = Math.min(maxLevies(state, r.id), Math.round(r.levies + maxLevies(state, r.id) * 0.14));
   lifeAndDeath(state, map, rng);
+  courtLife(state, map, rng);
   wars(state, map, rng);
   aiWars(state, map, rng);
 }
@@ -46,8 +47,17 @@ function playerPhase(state, map, rng) {
   if (state.gameOver) return;
   if (state.players) autoResolveStale(state, map);
   const pr = playerRealm(state);
+  if (state.tax == null) state.tax = 'normal';
+  if (state.mood == null) state.mood = 60;
+  state.omens = omensOf(state);
   state.gold += income(state);
-  state.prestige += 1;
+  state.prestige += 1 + omenSum(state, 'prestige');
+  // the people's mood drifts with taxes, war, feasts and omens, and always leans back toward "content"
+  {
+    const ch = chaosMult(state);
+    const d = moodParts(state).reduce((a, p) => a + p.v, 0) + (58 - state.mood) * 0.12 + rng.range(-2, 2) * ch;
+    state.mood = clamp(Math.round(state.mood + d), 0, 100);
+  }
   pr.levies = Math.min(maxLevies(state, pr.id), Math.round(pr.levies + maxLevies(state, pr.id) * 0.14));
   state.audiences = Math.min(3, state.audiences + 1);
   // opinion modifiers wear off; promises to the dead are void
@@ -60,6 +70,7 @@ function playerPhase(state, map, rng) {
   aiDiplomacy(state, map, rng);
   promiseDeadlines(state);
   epithets(state);
+  deliverLife(state, map);
   drawEvents(state, map, rng);
   if (state.gold < -100 && !state.flags.debtWarned) { state.flags.debtWarned = true; queueEvent(state, 'bankrupt', {}); }
   if (state.inbox) for (const t of state.flags.lastTurnEvents || []) pushInbox(state, t.icon, t.text);
@@ -90,7 +101,7 @@ function lifeAndDeath(state, map, rng) {
   for (const c of Object.values(state.chars)) {
     if (!c.alive) continue;
     const a = ageOf(state, c);
-    let p = deathChance(a);
+    let p = deathChance(a) * Math.sqrt(chaosMult(state));
     if (c.imprisoned) p *= 2;
     if (rng.chance(p)) kill(state, map, c, rng.pick(a > 60 ? ['old age', 'a fever', 'a bad fall', 'a surfeit of eels'] : ['a fever', 'a hunting accident', 'a duel', 'a surfeit of eels', 'mysterious circumstances']));
     if (state.gameOver) return;
@@ -124,10 +135,12 @@ export function kill(state, map, c, cause) {
   for (const p of state.promises) if (p.status === 'open' && p.to === c.id) p.status = 'void';
   if (r && r.ruler === c.id) succession(state, map, r, c, cause, isPlayerRuler);
   else if (r && r.id === state.playerRealm) {
-    record(state, `${c.name} (${roleLabel(state, c)}) died of ${cause}.`, { kind: 'death', chars: [c.id] });
-    (state.flags.lastTurnEvents || (state.flags.lastTurnEvents = [])).push({ icon: '✝', text: `${c.name} has died of ${cause}.` });
+    record(state, `${c.name} (${roleLabel(state, c)}) ${deathPhrase(cause)}.`, { kind: 'death', chars: [c.id] });
+    (state.flags.lastTurnEvents || (state.flags.lastTurnEvents = [])).push({ icon: '✝', text: `${c.name} ${cause === 'execution' ? 'was executed' : 'has died of ' + cause}.` });
   }
 }
+
+const deathPhrase = cause => (cause === 'execution' ? 'was executed' : `died of ${cause}`);
 
 function consorts(state, dead, heir) {
   const widow = dead.spouse && state.chars[dead.spouse];
@@ -221,6 +234,8 @@ export function battle(state, war, playerChoice, rng) {
     const boost = { charge: rng.range(0.7, 1.5), hold: rng.range(0.95, 1.2), flank: mar(playerIsA ? A : D) >= 11 ? rng.range(1.1, 1.4) : rng.range(0.6, 1.0) }[playerChoice] || 1;
     if (playerIsA) pa *= boost; else pd *= boost;
   }
+  const omenMul = omensOf(state).reduce((a, o) => a * (OMENS[o.id].battle || 1), 1);
+  if (omenMul !== 1) { if (war.attacker === state.playerRealm) pa *= omenMul; else if (war.defender === state.playerRealm) pd *= omenMul; }
   const aWins = pa >= pd;
   const ratio = aWins ? pa / Math.max(1, pd) : pd / Math.max(1, pa);
   const swing = Math.round(clamp(15 + ratio * 10, 18, 45));
@@ -362,6 +377,133 @@ function npcInitiatives(state, map, rng, ns) {
   }
 }
 
+// ---------------------------------------------------------------- the court lives its own life
+const QUARRELS = ['a hunting dog', 'precedence at dinner', 'a borrowed horse', 'a poem nobody asked for', 'the last pie', 'a disputed hedge', 'whose turn it was to hold the torch'];
+const BONDS = ["a shared dislike of the chaplain's sermons", 'a lost wager', 'a long, damp hunt', 'mutual despair over the soup', 'a stolen pastry', 'an unexpected duet'];
+const SCANDALS = ['sneaking out of the kitchens with an entire ham', 'reciting poetry at a funeral', 'losing the family silver at dice', "swapping the chaplain's sermon for limericks", 'teaching a goose to bow', 'sleeping through a coronation'];
+const TALENTS = { mar: 'won the autumn tourney', dip: 'settled a village dispute with great tact', stw: 'balanced the household books for once', int: 'uncovered a smuggling ring' };
+
+/** Everyone gets on with their lives: friendships, feuds, courtships, weddings, duels, illness. Shared by all players. */
+function courtLife(state, map, rng) {
+  const ch = chaosMult(state);
+  const log = state.lifeLog || (state.lifeLog = []);
+  const push = (kind, icon, text, ids, major) => {
+    log.push({ turn: state.turn, kind, icon, text, ids, major: !!major });
+    for (const id of ids) lifeNote(state, state.chars[id], text.slice(0, 140));
+    if (log.length > 60) log.shift();
+  };
+  const byRealm = {};
+  for (const c of Object.values(state.chars)) if (c.alive && !c.imprisoned && ageOf(state, c) >= 14 && state.realms[c.realm]) (byRealm[c.realm] = byRealm[c.realm] || []).push(c);
+  // courts that are too small for local romance still make matches across the border: one of the pair moves to the other's court
+  if (map) {
+    const ok = x => x.alive && !x.spouse && !x.imprisoned && ageOf(state, x) >= 17 && ageOf(state, x) <= 50;
+    for (const r of state.realms) {
+      if (!r.alive || r.id === state.playerRealm || isHumanRealm(state, r.id) || !rng.chance(0.07 * ch)) continue;
+      const mine = (byRealm[r.id] || []).filter(x => ok(x) && r.ruler !== x.id);
+      if (!mine.length) continue;
+      const a = rng.pick(mine);
+      const near = neighborsOfRealm(state, map, r.id).filter(n => state.realms[n].alive && n !== state.playerRealm && !isHumanRealm(state, n));
+      const pool = [];
+      for (const n of near) for (const x of byRealm[n] || []) if (ok(x) && x.sex !== a.sex && state.realms[n].ruler !== x.id) pool.push(x);
+      if (!pool.length) continue;
+      const b = rng.pick(pool);
+      const [mover, stayer] = a.sex === 'f' ? [a, b] : [b, a];
+      const from = state.realms[mover.realm], to = state.realms[stayer.realm];
+      mover.realm = stayer.realm; mover.court = true; mover.role = 'courtier';
+      a.spouse = b.id; b.spouse = a.id; (a.rel || (a.rel = {})); (b.rel || (b.rel = {})); bumpBoth(a, b, 40, 'Spouse');
+      const rf = state.chars[from.ruler], rt = state.chars[to.ruler];
+      if (rf && rt) bumpBoth(rf, rt, 12, 'Marriage tie');
+      push('wedding', '💍', `${mover.name} of ${from.name} married ${stayer.name} of ${to.name}, joining their houses.`, [a.id, b.id], true);
+    }
+  }
+  for (const [rid, list] of Object.entries(byRealm)) {
+    if (!state.realms[rid].alive || list.length < 2) continue;
+    // new faces get a few acquaintances to like or loathe
+    for (const c of list) {
+      if (c.relSeeded) continue;
+      c.relSeeded = true;
+      if (!c.rel) c.rel = {};
+      for (const o of rng.shuffle(list.filter(x => x.id !== c.id)).slice(0, 3)) if (!c.rel[o.id]) bumpBoth(c, o, rng.int(-32, 38));
+    }
+    let n = 0;
+    if (rng.chance(0.45 * ch)) n = rng.chance(0.3 * ch) ? 2 : 1;
+    for (let i = 0; i < n; i++) {
+      const a = rng.pick(list);
+      if (!a.alive) continue;
+      const peers = list.filter(x => x.alive && x.id !== a.id);
+      if (!peers.length) continue;
+      const kind = rng.weighted([['ill', 2], ['feud', 2.2], ['friends', 2.2], ['romance', 1.8], ['talent', 1.6], ['scandal', 1.2], ['duel', 0.8 * ch]]);
+      const rulerOf = state.realms[rid].ruler;
+      const isRuler = rulerOf === a.id;
+      if (kind === 'ill') {
+        if (ageOf(state, a) > 56 && rng.chance(0.07)) { push('ill', '🤒', `${a.name} lingered for weeks, then passed away.`, [a.id], true); kill(state, map, a, 'a long illness'); continue; }
+        push('ill', '🤒', `${a.name} fell gravely ill with the sweating sickness, but pulled through.`, [a.id], isRuler);
+      } else if (kind === 'feud') {
+        const b = rng.pick(peers);
+        bumpBoth(a, b, -26, 'Rival');
+        push('feud', '💢', `${a.name} and ${b.name} quarrelled bitterly over ${rng.pick(QUARRELS)}.`, [a.id, b.id], isRuler || rulerOf === b.id);
+      } else if (kind === 'friends') {
+        const b = rng.pick(peers);
+        bumpBoth(a, b, 22, 'Friend');
+        push('friends', '🤝', `${a.name} and ${b.name} became firm friends over ${rng.pick(BONDS)}.`, [a.id, b.id], false);
+      } else if (kind === 'romance') {
+        if (a.spouse || isRuler || ageOf(state, a) < 17 || ageOf(state, a) > 55) continue;
+        const free = x => x.alive && !x.spouse && x.sex !== a.sex && ageOf(state, x) >= 17 && ageOf(state, x) <= 55 && rulerOf !== x.id
+          && !(x.parents && a.parents && x.parents.some(p => a.parents.includes(p))) && !(x.parents || []).includes(a.id) && !(a.parents || []).includes(x.id);
+        const cands = peers.filter(free);
+        const b = cands.find(x => a.rel[x.id] && a.rel[x.id].tag === 'Sweetheart') || (cands.length ? rng.pick(cands) : null);
+        if (!b) continue;
+        if (a.rel[b.id] && a.rel[b.id].tag === 'Sweetheart') {
+          if (!rng.chance(0.45)) continue;
+          a.spouse = b.id; b.spouse = a.id; bumpBoth(a, b, 25, 'Spouse');
+          push('wedding', '💍', `${a.name} and ${b.name} were married in a small, slightly damp ceremony.`, [a.id, b.id], true);
+        } else {
+          bumpBoth(a, b, 30, 'Sweetheart');
+          push('romance', '💕', `${a.name} and ${b.name} have been seen walking together, suspiciously close.`, [a.id, b.id], false);
+        }
+      } else if (kind === 'talent') {
+        const k = rng.pick(Object.keys(TALENTS));
+        if (a.stats[k] >= 20) continue;
+        a.stats[k]++;
+        push('talent', '⭐', `${a.name} ${TALENTS[k]}.`, [a.id], isRuler);
+      } else if (kind === 'scandal') {
+        push('scandal', '🤭', `${a.name} was caught ${rng.pick(SCANDALS)}.`, [a.id], isRuler);
+      } else if (kind === 'duel') {
+        const foes = peers.filter(x => regard(a, x) <= -20 && ageOf(state, x) >= 16);
+        if (!foes.length || isRuler) continue;
+        const b = rng.pick(foes);
+        if (rulerOf === b.id) continue;
+        const sa = a.stats.mar + rng.int(0, 10), sb = b.stats.mar + rng.int(0, 10);
+        const [w, l] = sa >= sb ? [a, b] : [b, a];
+        bumpBoth(a, b, 15);
+        if (rng.chance(0.12 + 0.05 * ch)) {
+          push('duel', '⚔', `${w.name} killed ${l.name} in a duel at dawn.`, [w.id, l.id], true);
+          kill(state, map, l, 'a duel');
+        } else push('duel', '⚔', `${w.name} bested ${l.name} in a dawn duel; both walked away, one limping.`, [w.id, l.id], true);
+      }
+    }
+  }
+}
+
+/** Tell the mounted player about life events involving people they know; only the big ones interrupt. */
+function deliverLife(state, map) {
+  const me = state.playerRealm, near = new Set(neighborsOfRealm(state, map, me));
+  const rulerKnown = id => { const c = state.chars[id]; if (!c || !c.alive) return false; const r = state.realms[c.realm]; return !!r && r.ruler === c.id && r.id !== me && (near.has(r.id) || allied(state, r.id, me) || !!atWar(state, r.id, me)); };
+  const mine = id => { const c = state.chars[id]; return !!c && c.realm === me; };
+  const pl = player(state);
+  const family = id => { const c = state.chars[id]; return !!c && (c.id === pl.id || c.spouse === pl.id || (c.parents || []).includes(pl.id) || (pl.parents || []).includes(c.id)); };
+  let shown = 0;
+  for (const e of state.lifeLog || []) {
+    if (e.turn !== state.turn || !e.ids.some(id => mine(id) || rulerKnown(id))) continue;
+    record(state, e.text, { kind: 'life', chars: e.ids, mem: e.major });
+    if (shown++ < 3) (state.flags.lastTurnEvents || (state.flags.lastTurnEvents = [])).push({ icon: e.icon, text: e.text });
+    const important = e.major && e.ids.some(id => family(id) || (mine(id) && state.chars[id].court) || rulerKnown(id));
+    // popups are capped: at most one every 3 seasons, so the news stays a treat
+    const gap = state.flags.lastNews == null ? 99 : state.turn - state.flags.lastNews;
+    if (important && gap >= 3 && state.queue.length < QUEUE_SOFT && !state.queue.some(q => q.id === 'court_news')) { state.flags.lastNews = state.turn; queueEvent(state, 'court_news', { a: e.ids[0], b: e.ids[1] || null, text: e.text, kind: e.kind }); }
+  }
+}
+
 // ---------------------------------------------------------------- promises
 
 export function makePromise(state, o) {
@@ -422,7 +564,7 @@ function epithets(state) {
   }
 }
 
-export const aggrMult = state => ((state.settings && DIFFICULTY[state.settings.difficulty]) || DIFFICULTY.normal).aggr;
+export const aggrMult = state => ((state.settings && DIFFICULTY[state.settings.difficulty]) || DIFFICULTY.normal).aggr * Math.sqrt(chaosMult(state));
 
 /** The realm's prized foodstuff, for the running joke (cheese in the silly presets). */
 export function foodOf(state) {

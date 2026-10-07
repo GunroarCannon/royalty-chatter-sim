@@ -1,5 +1,5 @@
 # Fly.io: `fly launch --no-deploy` once, `fly volumes create data --size 1`, set secrets, then `fly deploy`.
-app = "royal-banter"
+app = "royal-ramble"
 primary_region = "lhr"
 
 [build]

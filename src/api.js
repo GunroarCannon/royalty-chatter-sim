@@ -19,6 +19,7 @@ export const playerId = (() => {
 export const api = {
   health: () => req('/api/health'),
   profile: () => req(`/api/profile/${playerId}`),
+  deleteSave: slot => req('/api/save/delete', { pid: playerId, slot }),
   save: (state, campaignSummary) => req('/api/save', { pid: playerId, state, campaignSummary }),
   remember: entries => req('/api/memory', { pid: playerId, entries }),
   rumours: q => req('/api/rumours' + (q ? '?q=' + encodeURIComponent(q) : '')),

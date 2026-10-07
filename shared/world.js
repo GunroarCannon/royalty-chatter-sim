@@ -85,7 +85,7 @@ export function createWorld(seed, opts = {}) {
   const map = opts.map || generateMap(seed);
   const presetId = opts.preset || 'world';
   const pre = preset(presetId);
-  const settings = Object.assign({ difficulty: 'normal', realms: 'normal', shareWorld: true }, opts.settings || {});
+  const settings = Object.assign({ difficulty: 'normal', realms: 'normal', shareWorld: true, entropy: 35 }, opts.settings || {});
   const diff = DIFFICULTY[settings.difficulty] || DIFFICULTY.normal;
   const rg = realmGrowth(map, new RNG('realms:' + seed + (settings.realms === 'normal' ? '' : ':' + settings.realms)), REALM_COUNTS[settings.realms] || 16);
   const year = opts.year || START_YEAR;
@@ -93,7 +93,7 @@ export function createWorld(seed, opts = {}) {
     version: 2, seed, preset: presetId, settings, campaign: opts.campaign || 1, year, season: 0, turn: 0, nextId: 1,
     chars: {}, realms: [], owner: Array.from(rg.owner), wars: [], alliances: [], promises: [],
     chronicle: [], outbox: [], queue: [], reigns: [], flags: {}, provNames: null,
-    gold: diff.gold, prestige: 50, audiences: 2,
+    gold: diff.gold, prestige: 50, audiences: 2, tax: 'normal', mood: 60, omens: [], lifeLog: [],
     stats: { wars: 0, battlesWon: 0, battlesLost: 0, promisesMade: 0, promisesKept: 0, promisesBroken: 0, gifts: 0, insults: 0, provincesWon: 0, provincesLost: 0, imprisoned: 0, conversations: 0, feasts: 0, cheese: 0 },
   };
 
@@ -180,13 +180,13 @@ export function setupCourt(state, realmId, prng, newHouse) {
 // chronicle, and every character's opinion of *that* player) lives in state.players[pid]; before a
 // player's action runs we "mount" their view into the top-level fields, so all the single-player
 // rules work unchanged, then write it back. A null mount is the neutral world (no player).
-export const PLAYER_KEYS = ['playerRealm', 'dynasty', 'gold', 'prestige', 'audiences', 'stats', 'promises', 'queue', 'reigns', 'outbox', 'chronicle', 'gameOver', 'flags', 'inbox'];
+export const PLAYER_KEYS = ['playerRealm', 'dynasty', 'gold', 'prestige', 'audiences', 'stats', 'promises', 'queue', 'reigns', 'outbox', 'chronicle', 'gameOver', 'flags', 'inbox', 'tax', 'mood', 'omens'];
 const newStats = () => ({ wars: 0, battlesWon: 0, battlesLost: 0, promisesMade: 0, promisesKept: 0, promisesBroken: 0, gifts: 0, insults: 0, provincesWon: 0, provincesLost: 0, imprisoned: 0, conversations: 0, feasts: 0, cheese: 0 });
 
 function mount(state, pid) {
   const p = pid ? state.players[pid] : null;
   if (p) for (const k of PLAYER_KEYS) state[k] = p[k];
-  else Object.assign(state, { playerRealm: -1, dynasty: null, gold: 0, prestige: 0, audiences: 0, stats: newStats(), promises: [], queue: [], reigns: [], outbox: state.worldOutbox || (state.worldOutbox = []), chronicle: [], gameOver: null, flags: {}, inbox: [] });
+  else Object.assign(state, { playerRealm: -1, dynasty: null, gold: 0, prestige: 0, audiences: 0, stats: newStats(), promises: [], queue: [], reigns: [], outbox: state.worldOutbox || (state.worldOutbox = []), chronicle: [], gameOver: null, flags: {}, inbox: [], tax: 'normal', mood: 60, omens: [] });
   for (const c of Object.values(state.chars)) {
     const e = p && p.ops[c.id];
     c.opinion = e ? e.o : (c.op0 != null ? c.op0 : 0);
@@ -239,7 +239,7 @@ export function joinRealm(state, pid, realmId, name) {
   state.players[pid] = {
     name: name || (old && old.name) || 'A stranger', realm: realmId, joined: state.turn, ops: (old && old.ops) || {}, seen: Date.now(),
     playerRealm: realmId, dynasty: r.house, gold: diff.gold, prestige: 50, audiences: 2, stats: newStats(), promises: [], queue: [],
-    reigns: [{ ruler: ruler.id, name: fullName(state, ruler), from: state.year, to: null }], outbox: [], gameOver: null, flags: {}, inbox: [],
+    reigns: [{ ruler: ruler.id, name: fullName(state, ruler), from: state.year, to: null }], outbox: [], gameOver: null, flags: {}, inbox: [], tax: 'normal', mood: 60, omens: [],
     chronicle: [{ y: state.year, s: state.season, kind: 'reign', text: `${fullName(state, ruler)} takes the throne of ${r.name}.` }],
   };
   return state.players[pid];
@@ -268,7 +268,7 @@ export function makeChar(state, rng, o) {
     traits, quirk: rng.pick(QUIRKS), stats: { dip: rng.int(2, 16), mar: rng.int(2, 16), stw: rng.int(2, 16), int: rng.int(2, 16) },
     opinion: rng.int(-20, 15), mods: [], spouse: null, children: [], parents: o.parents || null,
     portrait: { seed: rng.seed(), archetype: culture(o.heritage).a, gender: sex === 'm' ? 'masc' : 'fem' },
-    epithet: null, regnal: null, imprisoned: false,
+    epithet: null, regnal: null, imprisoned: false, rel: {}, log: [],
   };
   const st = ROLE_INFO[c.role] && ROLE_INFO[c.role].stat;
   if (st) c.stats[st] = rng.int(9, 20);
@@ -341,6 +341,8 @@ export function opinionOf(state, c) {
   const parts = [{ label: 'Base', value: c.opinion }];
   for (const t of c.traits) if (TRAITS[t].op) parts.push({ label: TRAITS[t].label, value: TRAITS[t].op });
   for (const m of c.mods) parts.push({ label: m.label, value: m.value });
+  const pres = prestigeOpinion(state);
+  if (pres && state.playerRealm >= 0 && c.id !== player(state).id) parts.push({ label: pres > 0 ? 'Awed by your prestige' : 'Unimpressed by your prestige', value: pres });
   if (state.alliances.some(a => a.includes(c.realm) && a.includes(state.playerRealm)) && c.realm !== state.playerRealm) parts.push({ label: 'Allied', value: 20 });
   if (state.wars.some(w => (w.attacker === c.realm && w.defender === state.playerRealm) || (w.defender === c.realm && w.attacker === state.playerRealm))) parts.push({ label: 'At war', value: -40 });
   const total = clamp(parts.reduce((s, p) => s + p.value, 0), -100, 100);
@@ -383,15 +385,123 @@ export function maxLevies(state, realmId) {
   if (realmId === state.playerRealm) {
     const m = council(state).marshal;
     if (m) base = Math.round(base * (1 + m.stats.mar / 60));
+    base = Math.round(base * (1 + clamp(state.prestige || 0, 0, 200) / 800));
   }
   return base;
 }
 
-export function income(state) {
+// ---------------------------------------------------------------- the realm's purse and mood
+export const TAX = {
+  low: { label: 'Light', mult: 0.6, mood: 4, desc: 'The people sing your name. The treasury sighs.' },
+  normal: { label: 'Fair', mult: 1, mood: 0, desc: 'Nobody is thrilled. Nobody revolts.' },
+  high: { label: 'Heavy', mult: 1.5, mood: -5, desc: 'More gold, more grumbling.' },
+  crushing: { label: 'Crushing', mult: 2, mood: -11, desc: 'The tax collectors travel with guards.' },
+};
+export const taxOf = state => TAX[state.tax] || TAX.normal;
+
+/** Real portents. Each has a true effect while it lasts. */
+export const OMENS = {
+  comet: { icon: '☄', label: 'A comet over the capital', good: true, mood: -3, battle: 1.15, desc: 'Armies feel destined (+15% in battle), but the people are uneasy.' },
+  bumper: { icon: '🌾', label: 'A golden dawn and fat geese', good: true, mood: 4, income: 4, desc: 'The land is generous: +4 gold a season and a happier people.' },
+  rainbow: { icon: '🌈', label: 'A double rainbow', good: true, mood: 6, prestige: 1, desc: 'Spirits soar and the court gossips fondly (+1 prestige a season).' },
+  lightning: { icon: '⚡', label: 'Lightning strikes the shrine', good: true, mood: -2, prestige: 2, desc: 'Awe: +2 prestige a season, though some are frightened.' },
+  raven: { icon: '🐦‍⬛', label: 'The ravens leave the tower', good: false, mood: -5, battle: 0.9, desc: 'Gloom spreads (people unhappier, −10% in battle).' },
+  eclipse: { icon: '🌑', label: 'An eclipse at noon', good: false, mood: -4, income: -4, desc: 'The markets close early: −4 gold a season, a gloomier people.' },
+};
+export const omensOf = state => (state.omens || []).filter(o => OMENS[o.id] && o.until > state.turn);
+export function addOmen(state, id, seasons = 4) {
+  state.omens = (state.omens || []).filter(o => o.id !== id && o.until > state.turn);
+  state.omens.push({ id, until: state.turn + seasons, from: state.turn });
+}
+export const omenSum = (state, key) => omensOf(state).reduce((a, o) => a + (OMENS[o.id][key] || 0), 0);
+
+/** How the world's "entropy" slider (0–100) scales chance: 0.5× calm … 2× chaotic. */
+export const chaosMult = state => 0.5 + 1.5 * (((state.settings && state.settings.entropy != null ? state.settings.entropy : 35)) / 100);
+
+export const prestigeOpinion = state => clamp(Math.round(((state.prestige || 0) - 50) / 12), -6, 10);
+export const prestigeTier = p => (p < 20 ? 'Obscure' : p < 60 ? 'Known' : p < 120 ? 'Renowned' : p < 200 ? 'Illustrious' : 'Legendary');
+export const moodTier = m => (m < 20 ? 'Seething' : m < 40 ? 'Grumbling' : m < 65 ? 'Content' : m < 85 ? 'Cheerful' : 'Jubilant');
+
+/** Where each season's gold comes from (and goes), for the treasury tooltip. */
+export function incomeParts(state) {
   const n = provincesOf(state, state.playerRealm).length;
   const st = council(state).steward;
   const lev = state.realms[state.playerRealm].levies;
-  return Math.round(n * 1.7 + (st ? st.stats.stw / 5 : 0) - lev / 600);
+  const t = taxOf(state);
+  const m = state.mood == null ? 60 : state.mood;
+  const parts = [{ label: `Taxes (${t.label})`, v: Math.round(n * 1.7 * t.mult) }];
+  if (st) parts.push({ label: 'Your steward', v: Math.round(st.stats.stw / 5) });
+  parts.push({ label: 'Army upkeep', v: -Math.round(lev / 600) });
+  const om = omenSum(state, 'income');
+  if (om) parts.push({ label: 'Omens', v: om });
+  if (m >= 80) parts.push({ label: 'Happy people trade more', v: Math.max(1, Math.round(n * 0.3)) });
+  else if (m < 25) parts.push({ label: 'Unrest hurts trade', v: -Math.max(1, Math.round(n * 0.3)) });
+  return parts.filter(p => p.v);
+}
+export const income = state => incomeParts(state).reduce((a, p) => a + p.v, 0);
+
+/** What nudges the people's mood each season (the pull toward calm is added by the sim). */
+export function moodParts(state) {
+  const parts = [];
+  const t = taxOf(state);
+  if (t.mood) parts.push({ label: `${t.label} taxes`, v: t.mood });
+  const wars = state.wars.filter(w => w.attacker === state.playerRealm || w.defender === state.playerRealm).length;
+  if (wars) parts.push({ label: 'War weariness', v: -2 * wars });
+  if (state.gold < 0) parts.push({ label: 'Unpaid wages and debts', v: -4 });
+  const f = state.flags && state.flags.lastFeast;
+  if (f != null && state.turn - f <= 2) parts.push({ label: 'Recent feast', v: 3 });
+  const om = omenSum(state, 'mood');
+  if (om) parts.push({ label: 'Omens', v: om });
+  return parts;
+}
+
+// ---------------------------------------------------------------- relationships between characters
+const familyBase = (a, b) => {
+  if (a.spouse === b.id) return 35;
+  if ((a.parents || []).includes(b.id) || (b.parents || []).includes(a.id)) return 30;
+  if (a.parents && b.parents && a.parents.some(p => b.parents.includes(p))) return 15;
+  return 0;
+};
+export const kinOf = (state, a, b) => {
+  if (a.spouse === b.id) return b.sex === 'm' ? 'Husband' : 'Wife';
+  if ((a.parents || []).includes(b.id)) return b.sex === 'm' ? 'Father' : 'Mother';
+  if ((b.parents || []).includes(a.id)) return b.sex === 'm' ? 'Son' : 'Daughter';
+  if (a.parents && b.parents && a.parents.some(p => b.parents.includes(p))) return b.sex === 'm' ? 'Brother' : 'Sister';
+  return null;
+};
+/** How much `a` thinks of `b` (−100..100); family start warm. */
+export const regard = (a, b) => clamp(((a.rel && a.rel[b.id] && a.rel[b.id].v) || 0) + familyBase(a, b), -100, 100);
+export const regardLabel = v => (v >= 55 ? 'Devoted' : v >= 25 ? 'Friend' : v <= -55 ? 'Sworn enemy' : v <= -25 ? 'Rival' : 'Acquaintance');
+export function bumpRegard(a, b, d, tag) {
+  if (!a || !b || a.id === b.id) return;
+  a.rel = a.rel || {};
+  const e = a.rel[b.id] || (a.rel[b.id] = { v: 0 });
+  e.v = clamp(e.v + d, -100, 100);
+  if (tag) e.tag = tag;
+}
+export const bumpBoth = (a, b, d, tag) => { bumpRegard(a, b, d, tag); bumpRegard(b, a, d, tag); };
+/** Everyone `c` has a notable opinion of (family included), strongest feelings first. */
+export function relationshipsOf(state, c) {
+  const ids = new Set(Object.keys(c.rel || {}));
+  for (const k of [...(c.parents || []), ...(c.children || []), c.spouse].filter(Boolean)) ids.add(k);
+  for (const o of Object.values(state.chars)) if (o.parents && c.parents && o.id !== c.id && o.parents.some(p => c.parents.includes(p))) ids.add(o.id);
+  const out = [];
+  for (const id of ids) {
+    const o = state.chars[id];
+    if (!o || o.id === c.id) continue;
+    const v = regard(c, o);
+    const e = c.rel && c.rel[id];
+    const kin = kinOf(state, c, o);
+    if (!kin && Math.abs(v) < 12) continue;
+    out.push({ c: o, v, kin, tag: (e && e.tag) || null, label: (e && e.tag) || kin || regardLabel(v) });
+  }
+  return out.sort((a, b) => (b.kin ? 1 : 0) - (a.kin ? 1 : 0) || Math.abs(b.v) - Math.abs(a.v));
+}
+/** One line in a character's own life story (shown on their page and given to the LLM). */
+export function lifeNote(state, c, text) {
+  if (!c) return;
+  (c.log || (c.log = [])).push({ y: state.year, s: state.season, t: text });
+  if (c.log.length > 6) c.log.shift();
 }
 
 export function livingCourt(state, realmId) {

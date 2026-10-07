@@ -3,11 +3,12 @@
 import {
   createWorld, player, playerRealm, provincesOf, fullName, roleLabel, opinionOf, ageOf, TRAITS, council, income, maxLevies,
   atWar, allied, neighborsOfRealm, dateStr, SEASONS, COUNCIL, livingCourt, applyProvNames,
+  TAX, taxOf, OMENS, omensOf, incomeParts, moodParts, moodTier, prestigeTier, prestigeOpinion, relationshipsOf,
 } from '../shared/world.js';
 import { PRESETS } from '../shared/cultures.js';
 import { generateMap } from '../shared/mapgen.js';
 import { endSeason, reputation } from '../shared/sim.js';
-import { canTalk, ACTIONS, marriageablesOfMine, marriageBlock, marriageChance, keepCost } from '../shared/actions.js';
+import { canTalk, ACTIONS, marriageablesOfMine, marriageBlock, marriageChance, keepCost, warBlock, executeBlock, allianceNeed, allianceLeverage } from '../shared/actions.js';
 import { resolveEvent } from '../shared/events.js';
 import { MapView } from './map/MapView.js';
 import { stillURL, moodExpr, liveActor } from './portraits.js';
@@ -23,6 +24,7 @@ import { openAudience, sexMark } from './ui/audience.js';
 import { openChat } from './ui/chat.js';
 import { music, musicForPreset, sfx, unlock, installClickSounds } from './audio.js';
 import { openChronicle } from './ui/chronicle.js';
+import { openContinue } from './ui/continue.js';
 import { installSketch } from './ui/sketch.js';
 import { armsEl } from './ui/heraldry.js';
 import { openSetup } from './ui/setup.js';
@@ -68,6 +70,10 @@ export class Game {
     // a copy of the solo save lives in the browser too, in case the server's disk was wiped
     try { const local = JSON.parse(localStorage.getItem('rb-save') || 'null'); if (local && (!this.profile.save || (local.turn > (this.profile.save.turn || 0) && local.seed === this.profile.save.seed) || local.seed !== this.profile.save.seed && !this.profile.save)) this.profile.save = local; } catch {}
     this.health = health;
+    // older saves had one slot: give it a name so it joins the list
+    const p = this.profile; p.saves = p.saves || {};
+    if (p.save && !p.save.slot) p.save.slot = 'g-' + (p.save.seed || 'old') + '-' + (p.save.campaign || 1);
+    if (p.save && !p.saves[p.save.slot]) p.saves[p.save.slot] = p.save;
     this.titleScreen();
   }
 
@@ -93,7 +99,7 @@ export class Game {
   toTitle() {
     this.save();
     this.leaveMp();
-    this.state = null; this.selected = null;
+    this.state = null; this.selected = null; this.audience = null; document.body.classList.remove('aud-open');
     $('#hud').innerHTML = '';
     document.querySelectorAll('.modal-back').forEach(e => e.remove());
     this.backdrop();
@@ -102,7 +108,8 @@ export class Game {
 
   titleScreen() {
     music('title');
-    const save = this.profile.save;
+    const saves = Object.values(this.profile.saves || {}).filter(x => x && !x.gameOver).sort((a, b) => (b.lastPlayed || 0) - (a.lastPlayed || 0));
+    const save = saves[0] || this.profile.save;
     const past = (this.profile.campaigns || []).slice(-4).reverse();
     const mem = this.health && this.health.memory && this.health.memory.enabled;
     const back = h('div.modal-back.clear', null, h('div.panel.title-screen', null,
@@ -112,8 +119,8 @@ export class Game {
       h('hr.orn'),
       h('p', null, 'Every character remembers what you say.', mem ? null : h('span.muted', null, ' (Memory is offline right now.)')),
       h('div.stack', null,
-        save && !save.gameOver ? h('button.btn.dark', { onclick: () => { back.remove(); this.load(save); } }, `Continue: ${save.dynasty ? 'House ' + save.dynasty : 'your reign'}, ${SEASONS[save.season]} ${save.year}`) : null,
-        h('button.btn' + (save && !save.gameOver ? '' : '.dark'), { onclick: () => { back.remove(); this.newCampaign(() => this.titleScreen()); } }, save ? '📜 Begin a new campaign' : '👑 Begin your reign'),
+        saves.length ? h('button.btn.dark', { onclick: () => { back.remove(); openContinue(this, () => this.titleScreen()); }, 'data-tip': tipHTML('Continue', `${saves.length} game${saves.length === 1 ? '' : 's'} on the go.`) }, `▶ Continue${saves.length > 1 ? ' (' + saves.length + ' games)' : ''}`) : null,
+        h('button.btn' + (saves.length ? '' : '.dark'), { onclick: () => { back.remove(); this.newCampaign(() => this.titleScreen()); } }, saves.length ? '📜 Start another game' : '👑 Begin your reign'),
         h('button.btn', { onclick: () => { back.remove(); openLobby(this, () => this.titleScreen()); } }, '🌍 Shared worlds (multiplayer)'),
         h('button.btn', { onclick: () => openOptions(this) }, '⚙ Options'),
       ),
@@ -122,7 +129,8 @@ export class Game {
   }
 
   newCampaign(onCancel) {
-    const prev = this.profile.save;
+    // only a finished reign offers "same world, a generation later"; otherwise this is a fresh game alongside the others
+    const prev = this.profile.save && this.profile.save.gameOver ? this.profile.save : null;
     openSetup(this, { prev, onCancel, onStart: ({ state, map }) => this.beginCampaign(state, map, prev) });
   }
 
@@ -148,6 +156,7 @@ export class Game {
     this.start(r.state);
     this.toastInbox(!!r.meta.away);
     this.onMeta(r.meta);
+    if (!r.meta.away && r.state.chronicle.length) this.showRecap(r.state.chronicle.slice(-8), 0, `Back in ${r.meta.name}`);
     clearInterval(this.poll);
     this.poll = setInterval(() => this.sync(), 2500);
     clearInterval(this.clock);
@@ -158,6 +167,7 @@ export class Game {
   /** Things the server tells every sync: someone came to talk, or you were away a long time. */
   onMeta(meta) {
     if (!this.mp || !meta) return;
+    this.watchRoster(meta);
     this.chats = this.chats || {};
     for (const ch of meta.chats || []) {
       if (this.chats[ch.id] || !ch.incoming) continue;
@@ -173,6 +183,24 @@ export class Game {
       api.worldAct(this.mp.id, 'seenAway', []).catch(() => {});
       this.showRecap(entries, a.ms);
     }
+  }
+  /** Toasts (and a blink on the Players panel) when real people join, leave, arrive or step away. */
+  watchRoster(meta) {
+    const now = {};
+    for (const p of meta.players || []) now[p.realm] = { name: p.name, online: p.online, me: p.me };
+    const was = this.mp.roster;
+    this.mp.roster = now;
+    if (!was) return;
+    let ping = false;
+    for (const [rid, p] of Object.entries(now)) {
+      if (p.me) continue;
+      const q = was[rid];
+      if (!q) { toast(`${p.name} has joined the world!`, '👑', 6000); ping = true; }
+      else if (!q.online && p.online) { toast(`${p.name} is online.`, '🟢'); ping = true; }
+      else if (q.online && !p.online) { toast(`${p.name} has gone away.`, '💤'); ping = true; }
+    }
+    for (const [rid, q] of Object.entries(was)) if (!q.me && !now[rid]) { toast(`${q.name} has left the world.`, '🚪', 6000); ping = true; }
+    if (ping) { sfx('bell'); const pl = $('#players'); if (pl) { pl.classList.remove('ping'); void pl.offsetWidth; pl.classList.add('ping'); } }
   }
   async enterChat(id, chat) {
     this.chats = this.chats || {};
@@ -265,7 +293,18 @@ export class Game {
   applyPending() { if (this.pending && !this.modal) this.applyView(this.pending); }
 
   /** Do something to the world. Single player: run the rule locally. Shared world: ask the server. */
+  /** Remember who you last dealt with (audiences, gifts, ...) for the Chronicle's "Recent" tab. */
+  noteRecent(id, what) {
+    const s = this.state;
+    if (!s || !s.chars || !s.chars[id] || id === player(s).id) return;
+    const key = 'rb-recent:' + s.seed;
+    let list = [];
+    try { list = JSON.parse(localStorage.getItem(key) || '[]'); } catch {}
+    list = [{ id, what, y: s.year, s: s.season, t: s.turn }, ...list.filter(x => x.id !== id)].slice(0, 15);
+    try { localStorage.setItem(key, JSON.stringify(list)); } catch {}
+  }
   async action(name, ...args) {
+    if (typeof args[0] === 'string' && this.state && this.state.chars && this.state.chars[args[0]] && ['gift', 'imprison', 'release', 'execute', 'banish', 'dismiss', 'keep', 'letter'].includes(name)) this.noteRecent(args[0], name);
     if (!this.mp) {
       const res = ACTIONS[name](this.state, this.map, ...args);
       this.act(res);
@@ -282,7 +321,7 @@ export class Game {
     } catch (e) { toast(e.message, '✖'); return { ok: false, msg: e.message }; }
   }
   async resolveEvent(item, key) {
-    if (!this.mp) return resolveEvent(this.state, this.map, item, key);
+    if (!this.mp) { const msg = resolveEvent(this.state, this.map, item, key); this.flush(); this.save(); return msg; } // saved the moment an event is dealt with
     const res = await this.action('resolve', item.uid, key);
     return (res && res.msg) || '';
   }
@@ -293,13 +332,15 @@ export class Game {
     this.start(state);
     // back after a long break: "previously, in your reign…"
     const gap = state.lastPlayed ? Date.now() - state.lastPlayed : 0;
-    if (gap > 6 * 3600_000 && state.chronicle.length > 3) setTimeout(() => this.showRecap(state.chronicle.slice(-14), gap, 'Previously, in your reign…'), 900);
+    if (state.chronicle.length) this.showRecap(state.chronicle.slice(-8), gap, 'Previously, in your reign…');
   }
 
   /** A short paragraph of what happened, written by the chronicler (the list itself if the LLM is out). */
   showRecap(entries, gap, title = 'While you were away') {
-    if (!entries.length) return;
+    if (!entries.length || this.recapOpen) return;
     const s = this.state, texts = entries.map(e => `${SEASONS[e.s]} ${e.y}: ${e.text}`);
+    const pr0 = playerRealm(s), onl = this.mp ? (this.mp.meta.players || []).filter(p => p.online).length : 0, nOpen = s.promises.filter(p => p.status === 'open').length;
+    const status = h('div.recap-status', null, `${fullName(s, player(s))} of ${pr0.name} · ${dateStr(s)} · 💰 ${s.gold} · ⚔ ${pr0.levies}${this.mp ? ` · ${(this.mp.meta.players || []).length} rulers, ${onl} online` : ''}${nOpen ? ` · 🤞 ${nOpen} open promise(s)` : ''}`);
     const body = h('div.recap-text', null, typingDots(), ' The chronicler clears his throat…');
     const more = h('details.recap-more', null, h('summary', null, `All ${entries.length} entries`), entries.slice().reverse().map(e => h('div.entry', null, h('span.y', null, `${SEASONS[e.s]} ${e.y}`), this.link(e.text, e.chars))));
     const close = () => { back.remove(); this.recapOpen = false; if (!this.modal) this.processQueue(); };
@@ -307,7 +348,7 @@ export class Game {
     const back = h('div.modal-back', { onclick: e => { if (e.target === back) close(); } }, h('div.panel.dialog.recap', null,
       ['tl', 'tr', 'bl', 'br'].map(k => h('i.corner.' + k)),
       h('div.titlebar', null, title),
-      h('div.dialog-body', null, h('div.dialog-seal', null, '📜'), h('div', { style: { flex: 1 } }, body, more)),
+      h('div.dialog-body', null, h('div.dialog-seal', null, '📜'), h('div', { style: { flex: 1 } }, status, body, more)),
       h('div.dialog-foot', null, h('button.btn.dark', { onclick: close }, 'Carry on'))));
     document.body.append(back);
     sfx('bell');
@@ -319,7 +360,7 @@ export class Game {
   start(state) {
     this.state = state;
     state.flags = state.flags || {};
-    this.snap = null; this.opSeen = {};
+    this.snap = null; this.opSeen = {}; this.chronSeen = null;
     setLinkifier((text, ids) => this.link(text, ids));
     document.getElementById('advisor')?.remove();
     if (!this.view) {
@@ -386,16 +427,19 @@ export class Game {
   async save() {
     const s = this.state;
     if (!s || this.mp) return;
+    if (!s.slot) s.slot = 'g' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
     const r = s.reigns[0], last = s.reigns[s.reigns.length - 1];
     const summary = { campaign: s.campaign, dynasty: s.dynasty, realm: playerRealm(s).name, from: r.from, to: s.year, rep: last.rep || reputation(s.stats), rulers: s.reigns.map(x => x.name) };
     s.lastPlayed = Date.now();
     try { localStorage.setItem('rb-save', JSON.stringify(s)); } catch {}
     try { await api.save(s, summary); } catch (e) { console.warn('save failed', e); }
     this.profile.save = s;
+    (this.profile.saves = this.profile.saves || {})[s.slot] = s;
   }
 
   // ------------------------------------------------------------ turns
   async endTurn() {
+    if (this.audience) { toast('Finish your audience first.', '🔔'); return; }
     if (this.mp) {
       if (this.state.queue.length && !this.modal) return this.processQueue();
       return this.hurrySeason();
@@ -444,13 +488,16 @@ export class Game {
   talk(charId, { free = false, reason = '', onClose } = {}) {
     const s = this.state, c = s.chars[charId];
     if (!canTalk(s, c)) { toast('They cannot speak with you.', '🤐'); return; }
+    if (this.audience) { toast('Finish your current audience first.', '🔔'); return; }
     if (!free && s.audiences <= 0) { toast('No audience bells left. End the season to get another 🔔.', '🔔'); this.nudgeEnd(); return; }
     if (!free && !this.mp) { s.audiences--; floatDelta($('#endturn .seals'), '−1 🔔', 'neg', { below: true }); }
     const wasModal = this.modal;
     this.modal = true;
     this.refresh();
-    openAudience(this, c, { reason, free, onClose: () => {
+    openAudience(this, c, { reason, free, onClose: said => {
       this.modal = wasModal;
+      // nothing was said (they could not speak, or you left at once): give the bell back
+      if (!free && !this.mp && !said && s.audiences < 3) { s.audiences++; this.refresh(); }
       if (this.mp) { this.sync(); onClose && onClose(); return; }
       this.refresh(); this.flush(); this.save();
       if (this.view && s.flags.mapDirty) this.view.invalidate();
@@ -513,12 +560,13 @@ export class Game {
       h('div#endturn.panel', null,
         h('div.et-top', null,
           h('button.round-btn', { onclick: () => openAdvisor(this), 'data-tip': tipHTML('Ask your advisor', '"Who should I attack?" "Find me a match." Click a suggestion to go there.') }, '?'),
-          h('button.round-btn', { onclick: () => this.goHome(), 'data-tip': tipHTML('Go home', 'Fly the map back to your lands.') }, '⌂')),
+          h('button.round-btn', { onclick: () => this.goHome(), 'data-tip': tipHTML('Go home', 'Fly the map back to your lands.') }, '⌂'),
+          h('button.round-btn', { onclick: () => this.view.fitWorld(), 'data-tip': tipHTML('Zoom out', 'See the whole map at once. (Key: 0)') }, '⤢')),
         h('div', null, h('div.date.sc', { 'data-tip': tipHTML('The date', 'Each season is one turn.') }), h('div.seals', { 'data-tip': tipHTML('Audience bells', 'Talking to someone costs one 🔔.<br>You get one more each season (up to 3).<br>When an event offers a talk, it is free.') })),
         h('button.end-btn', { onclick: () => this.endTurn() }, 'End', h('br'), 'Season')),
       h('div#menu.panel', null,
         h('button.btn.small', { onclick: () => this.selectChar(player(this.state).id, null, 'court'), 'data-tip': tipHTML('Your court', 'Council and courtiers, and how they feel about you.') }, '👥', h('span.mlbl', null, ' Court')),
-        h('button.btn.small', { onclick: () => openChronicle(this, 'chronicle'), 'data-tip': tipHTML('The chronicle', 'Everything that has happened in your reign.') }, '📖', h('span.mlbl', null, ' Chronicle')),
+        h('button.btn.small#btn-chron', { onclick: () => openChronicle(this, 'chronicle'), 'data-tip': tipHTML('The chronicle', 'Everything that has happened in your reign.') }, '📖', h('span.mlbl', null, ' Chronicle')),
         h('button.btn.small#btn-promises', { onclick: () => openChronicle(this, 'promises'), 'data-tip': tipHTML('Promises', 'What you swore, to whom, and when it is due. Keep them early from here.') }, '🤞', h('span.mlbl', null, ' Promises'), h('span.count')),
         h('button.btn.small', { onclick: () => openChronicle(this, 'tales'), 'data-tip': tipHTML('Tales from afar', 'Stories other players\' dynasties left in the world (Walrus Memory).') }, '🦭', h('span.mlbl', null, ' Tales')),
         h('button.btn.small.opt-btn', { onclick: () => openOptions(this), 'data-tip': tipHTML('Options', 'Settings, the tutorial again, the title screen.') }, '⚙'),
@@ -600,6 +648,8 @@ export class Game {
   idleWatch() {
     if (this._idleOn) return;
     this._idleOn = true;
+    // "0" fits the whole map, for when you get lost zoomed in
+    document.addEventListener('keydown', e => { if (e.key === '0' && !/INPUT|TEXTAREA/.test((e.target || {}).tagName || '') && this.view && this.state) this.view.fitWorld(); });
     document.addEventListener('keydown', e => { const t = e.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) this.lastKey = Date.now(); }, true);
     const poke = () => { const b = $('.end-btn'); if (b) b.classList.remove('breathe'); clearTimeout(this._idle); this._idle = setTimeout(() => this.idlePulse(), 12000); };
     ['pointerdown', 'keydown', 'wheel'].forEach(ev => document.addEventListener(ev, poke, true));
@@ -653,10 +703,13 @@ export class Game {
     const inc = income(s);
     const top = $('#topbar');
     top.innerHTML = '';
+    const sign = n => (n > 0 ? '+' : '') + n;
+    const mood = s.mood == null ? 60 : s.mood, mparts = moodParts(s);
     top.append(
-      h('div.res#res-gold', { 'data-tip': `<b>Treasury</b><br>${s.gold} gold<br>Income: ${inc >= 0 ? '+' : ''}${inc} per season<br><span class="muted">${provincesOf(s, pr.id).length} provinces, steward, minus army upkeep</span>` }, h('span.ic', null, '💰'), s.gold, h('small', null, ` ${inc >= 0 ? '+' : ''}${inc}`)),
-      h('div.res#res-levies', { 'data-tip': `<b>Levies</b><br>${pr.levies} of ${maxLevies(s, pr.id)} men.<br>Replenish each season. Your marshal's martial skill adds to the maximum.` }, h('span.ic', null, '⚔'), pr.levies),
-      h('div.res#res-prestige', { 'data-tip': '<b>Prestige</b><br>Fame and glory. Feasts, victories and bridges earn it; humiliations cost it.' }, h('span.ic', null, '⚜'), s.prestige),
+      h('div.res#res-gold', { 'data-tip': `<b>Treasury: ${s.gold} gold</b><br>Each season: <b>${sign(inc)}</b><br>${incomeParts(s).map(p => `${esc(p.label)}: <span class="${p.v > 0 ? 'pos' : 'neg'}">${sign(p.v)}</span>`).join('<br>')}<br><span class="muted">Change taxes in Your Majesty ▸ Realm.</span>` }, h('span.ic', null, '💰'), s.gold, h('small', null, ` ${sign(inc)}`)),
+      h('div.res#res-levies', { 'data-tip': `<b>Levies</b><br>${pr.levies} of ${maxLevies(s, pr.id)} men.<br>Replenish each season. Your marshal's martial skill and your prestige raise the maximum.<br>You can hire mercenaries for 40 gold.` }, h('span.ic', null, '⚔'), pr.levies),
+      h('div.res#res-prestige', { 'data-tip': `<b>Prestige: ${prestigeTier(s.prestige)}</b><br>Fame and glory. Feasts, victories and bridges earn it; humiliations cost it.<br>It makes rulers like you more (<span class="${prestigeOpinion(s) >= 0 ? 'pos' : 'neg'}">${sign(prestigeOpinion(s))}</span> opinion), helps marriages, and raises your army cap.` }, h('span.ic', null, '⚜'), s.prestige),
+      h('div.res#res-mood', { 'data-tip': `<b>The people: ${moodTier(mood)} (${mood}/100)</b><br>Taxes: ${taxOf(s).label}.<br>${mparts.length ? mparts.map(p => `${esc(p.label)}: <span class="${p.v > 0 ? 'pos' : 'neg'}">${sign(p.v)}</span>`).join('<br>') : 'Nothing is bothering them right now.'}<br><span class="muted">Below 25 they riot; above 80 they hold festivals and trade more.</span>` }, h('span.ic', null, mood < 25 ? '😡' : mood < 40 ? '😠' : mood < 65 ? '😐' : mood < 85 ? '🙂' : '😄'), mood),
       h('div.res', { 'data-tip': `<b>Reputation this reign</b><br>Promises kept: ${s.stats.promisesKept}<br>Promises broken: ${s.stats.promisesBroken}<br>Wars started: ${s.stats.wars}<br>Insults: ${s.stats.insults}<br><i>"${reputation(s.stats)}"</i>` }, h('span.ic', null, '📜'), reputation(s.stats).split(' ').pop()),
     );
     $('#endturn .date').textContent = dateStr(s);
@@ -667,6 +720,9 @@ export class Game {
     const endBtn = $('.end-btn');
     if (!this.mp) endBtn.setAttribute('data-tip', tipHTML('End the season', `Three months pass. You collect gold and soldiers, get another 🔔, and events, battles, births and deaths happen.${s.audiences ? '' : '<br><b>You have no bells left</b>, so this is the thing to do.'}`));
     endBtn.classList.toggle('glow', !this.mp && s.audiences === 0 && !s.queue.length);
+    // a light on the Chronicle when there is news you have not read
+    if (this.chronSeen == null) this.chronSeen = s.chronicle.length;
+    const cb = $('#btn-chron'); if (cb) cb.classList.toggle('unread', s.chronicle.length > this.chronSeen);
     // alerts
     const al = $('#alerts');
     al.innerHTML = '';
@@ -685,6 +741,10 @@ export class Game {
     }
     for (const p of dueSoon) {
       al.append(h('div.alert.gold', { 'data-tip': `<b>Promise due soon</b><br>To ${esc(s.chars[p.to].name)}: "${esc(p.text)}"`, onclick: () => this.selectChar(p.to) }, '🤞'));
+    }
+    for (const o of omensOf(s)) {
+      const O = OMENS[o.id];
+      al.append(h('div.alert.' + (O.good ? 'gold' : 'red'), { 'data-tip': `<b>${esc(O.label)}</b><br>${esc(O.desc)}<br><span class="muted">${Math.max(1, o.until - s.turn)} season(s) left</span>` }, O.icon));
     }
     if (this.selected) this.renderPanel();
     this.showDeltas();
@@ -736,48 +796,72 @@ export class Game {
       )));
     body.append(h('div.traits', null, traitEls), h('div.quirk', null, `${c.name} ${c.quirk}.`));
     body.append(h('div.stats', null,
-      [['dip', '🗣', 'Diplomacy'], ['mar', '⚔', 'Martial'], ['stw', '💰', 'Stewardship'], ['int', '🗝', 'Intrigue']].map(([k, ic, lb]) => h('div.stat', { 'data-tip': `<b>${lb}</b>` }, ic + ' ' + c.stats[k], h('small', null, lb)))));
+      [['dip', '🗣', 'Diplomacy', 'Charm and negotiation.<br><span class="muted">As chancellor: easier alliances and better marriage odds.</span>'],
+        ['mar', '⚔', 'Martial', 'Skill at war.<br><span class="muted">As marshal: a bigger army and better odds in battle.</span>'],
+        ['stw', '💰', 'Stewardship', 'Handling money.<br><span class="muted">As steward: more gold every season.</span>'],
+        ['int', '🗝', 'Intrigue', 'Spycraft and sly dealing.<br><span class="muted">As spymaster: better odds when pressing neighbours for tribute.</span>']]
+        .map(([k, ic, lb, desc]) => h('div.stat', { 'data-tip': `<b>${lb}: ${c.stats[k]}</b> (${c.stats[k] >= 16 ? 'brilliant' : c.stats[k] >= 11 ? 'capable' : c.stats[k] >= 6 ? 'average' : 'poor'})<br>${desc}` }, ic + ' ' + c.stats[k], h('small', null, lb)))));
 
     if (op) { const was = this.opSeen[c.id]; this.opSeen[c.id] = op.total; if (was != null && was !== op.total) setTimeout(() => floatDelta($('#cp-op'), (op.total > was ? '+' : '−') + Math.abs(op.total - was), op.total > was ? 'pos' : 'neg'), 30); }
     if (me) return this.renderSelf(body);
 
-    // actions
+    // actions. While an audience is open, anything that would disrupt it is greyed out with the reason.
     const acts = h('div.actions');
+    const inAud = !!this.audience;
+    const lockTip = tipHTML('In an audience', 'Finish your audience first.');
+    const btn = (cls, attrs, label) => h('button.btn' + cls, inAud ? Object.assign({}, attrs, { onclick: null, disabled: true, 'data-tip': lockTip }) : attrs, label);
+    const plainBtn = (attrs, label) => h('button.btn', inAud ? Object.assign({}, attrs, { onclick: null, disabled: true, 'data-tip': lockTip }) : attrs, label);
     const hu = s.humans && r && r.ruler === c.id && s.humans[r.id] && !s.humans[r.id].me ? s.humans[r.id] : null;
     if (hu && c.alive) {
       acts.append(hu.online
-        ? h('button.btn.dark', { onclick: () => this.talkToPlayer(c), 'data-tip': tipHTML('Talk face to face', `${esc(hu.name)} is online: a chat opens on their screen at once. Free.`) }, '💬 Talk')
+        ? btn('.dark', { onclick: () => this.talkToPlayer(c), 'data-tip': tipHTML('Talk face to face', `${esc(hu.name)} is online: a chat opens on their screen at once. Free.`) }, '💬 Talk')
         : hu.auto
-          ? h('button.btn.dark', { onclick: () => this.talk(c.id), disabled: s.audiences <= 0, 'data-tip': tipHTML('Talk to their steward', `${esc(hu.name)} is away. Their stand-in answers, guided by what they told it. Costs one 🔔.`) }, '🔔 Talk')
+          ? btn('.dark', { onclick: () => this.talk(c.id), disabled: s.audiences <= 0, 'data-tip': tipHTML('Talk to their steward', `${esc(hu.name)} is away. Their stand-in answers, guided by what they told it. Costs one 🔔.`) }, '🔔 Talk')
           : h('button.btn', { disabled: true, 'data-tip': tipHTML('Away', `${esc(hu.name)} is away and has auto replies off. Write a letter instead.`) }, '🔔 Talk'));
-    } else if (c.alive && canTalk(s, c)) acts.append(h('button.btn.dark', { onclick: () => this.talk(c.id), disabled: s.audiences <= 0, 'data-tip': s.audiences > 0 ? tipHTML('Talk', `Speak with ${esc(c.name)} in person. Costs one 🔔 (you have ${s.audiences}). They remember what you say, and may walk out.`) : tipHTML('No bells left', 'End the season to get another 🔔.') }, s.audiences > 0 ? '🔔 Talk' : '🔔 No bells'));
-    if (c.alive) acts.append(h('button.btn', { onclick: () => this.action('gift', c.id, this.giftAmount()), disabled: s.gold < 25, 'data-tip': tipHTML(`Gift ${this.giftAmount()} gold`, s.gold < 25 ? 'You need at least 25 gold.' : 'They will like you more. Greedy people love it.') }, `💰 Gift ${this.giftAmount()}`));
+    } else if (c.alive && canTalk(s, c)) acts.append(btn('.dark', { onclick: () => this.talk(c.id), disabled: s.audiences <= 0, 'data-tip': s.audiences > 0 ? tipHTML('Talk', `Speak with ${esc(c.name)} in person. Costs one 🔔 (you have ${s.audiences}). They remember what you say, and may walk out.`) : tipHTML('No bells left', 'End the season to get another 🔔.') }, s.audiences > 0 ? '🔔 Talk' : '🔔 No bells'));
+    if (c.alive) {
+      for (const n of this.giftOptions()) acts.append(btn('', { onclick: () => this.action('gift', c.id, n), 'data-tip': tipHTML(`Gift ${n} gold`, 'They will like you more. Greedy people love it.') }, `💰 Gift ${n}`));
+      if (s.gold < 25) acts.append(btn('', { onclick: () => this.action('flowers', c.id), 'data-tip': tipHTML('Wild flowers', 'Free. A small token, once a season per person. Better than nothing.') }, '🌼 Flowers'));
+    }
     const fam = c.alive ? marriageablesOfMine(s).filter(w => !marriageBlock(s, c, w)) : [];
-    if (fam.length) acts.append(h('button.btn', { onclick: () => this.proposeMarriage(c, fam), 'data-tip': tipHTML('Propose marriage', fam.map(w => `${w.id === pl.id ? 'You' : esc(w.name)}: ${marriageChance(s, c, w)}% chance`).join('<br>') + (c.realm !== s.playerRealm ? '<br>A foreign match warms their ruler.' : '')) }, '💍 Marry'));
-    const human = s.humans && r && r.ruler === c.id && s.humans[r.id] && !s.humans[r.id].me ? s.humans[r.id] : null;
-    if (human && c.alive) acts.append(h('button.btn', { onclick: () => this.writeLetter(r.id, c), 'data-tip': tipHTML('Write a letter', `To ${esc(human.name)}, the player who rules ${esc(r.name)}.`) }, '✉ Write'));
+    if (fam.length) acts.append(btn('', { onclick: () => this.proposeMarriage(c, fam), 'data-tip': tipHTML('Propose marriage', fam.map(w => `${w.id === pl.id ? 'You' : esc(w.name)}: ${marriageChance(s, c, w)}% chance`).join('<br>') + (c.realm !== s.playerRealm ? '<br>A foreign match warms their ruler.' : '')) }, '💍 Marry'));
+    const human = hu;
+    if (human && c.alive) acts.append(plainBtn({ onclick: () => this.writeLetter(r.id, c), 'data-tip': tipHTML('Write a letter', `To ${esc(human.name)}, the player who rules ${esc(r.name)}.`) }, '✉ Write'));
     const isRuler = r && r.ruler === c.id && r.id !== s.playerRealm;
     if (isRuler && c.alive) {
-      const war = atWar(s, r.id, s.playerRealm);
+      const war = atWar(s, r.id, s.playerRealm), isAlly = allied(s, r.id, s.playerRealm);
       if (war) {
-        acts.append(h('button.btn.dark', { onclick: () => openWar(this, war.id), 'data-tip': tipHTML('The war', 'Score, armies, battles, peace.') }, '⚔ View war'));
-        acts.append(h('button.btn', { onclick: () => this.action('peace', war.id), 'data-tip': tipHTML('Offer peace', scoreFor(s, war) >= 60 ? 'You are winning: they will yield the province.' : scoreFor(s, war) >= -20 ? 'A white peace: nobody gains.' : 'You are losing. They will refuse.') }, '🕊 Offer peace'));
+        acts.append(plainBtn({ onclick: () => openWar(this, war.id), 'data-tip': tipHTML('The war', 'Score, armies, battles, peace.') }, '⚔ View war'));
+        acts.append(btn('', { onclick: () => this.action('peace', war.id), 'data-tip': tipHTML('Offer peace', scoreFor(s, war) >= 60 ? 'You are winning: they will yield the province.' : scoreFor(s, war) >= -20 ? 'A white peace: nobody gains.' : 'You are losing. They will refuse.') }, '🕊 Offer peace'));
       } else {
-        const o = opinionOf(s, c).total;
-        if (!allied(s, r.id, s.playerRealm)) acts.append(h('button.btn', { onclick: () => this.action('alliance', c.id), 'data-tip': tipHTML('Propose an alliance', human ? 'Another player: they decide.' : `They need to like you (30+). Now: ${o}.`) }, '🤝 Alliance'));
-        if (neighborsOfRealm(s, this.map, s.playerRealm).includes(r.id)) acts.append(h('button.btn', { onclick: () => this.declareWar(r), 'data-tip': tipHTML('Declare war', `${r.levies} of theirs against your ${playerRealm(s).levies}. You fight one battle a season.`) }, '⚔ Declare war'));
-        else acts.append(h('button.btn', { disabled: true, 'data-tip': tipHTML('Too far away', 'You can only attack realms that border yours.') }, '⚔ Declare war'));
+        const o = opinionOf(s, c).total, need = allianceNeed(s);
+        if (isAlly) {
+          acts.append(btn('', { onclick: async () => { if (await confirmBox({ title: 'End the alliance?', icon: '💔', text: `${r.name} will take it badly.`, ok: 'End it', cancel: 'Keep it', danger: true })) this.action('cancelAlliance', r.id); }, 'data-tip': tipHTML('Cancel the alliance', 'Costs a little prestige. Needed before you can attack them.') }, '💔 Cancel alliance'));
+        } else acts.append(btn('', { onclick: () => this.action('alliance', c.id), 'data-tip': tipHTML('Propose an alliance', human ? 'Another player: they decide.' : `They need to like you (${need}+, a good chancellor lowers it). Now: ${o}.${allianceLeverage(s, c).reasons.length ? '<br>But: ' + allianceLeverage(s, c).reasons.join(', ') + ' (that may be enough).' : ''}`) }, '🤝 Alliance'));
+        if (warsOf(s).length && !human) acts.append(btn('', { onclick: () => this.action('aid', r.id), 'data-tip': tipHTML('Ask for soldiers', isAlly ? `Needs their opinion 10+ (now ${o}). They may send some men; they will not love being asked.` : `A non-ally needs opinion 28+ (now ${o}), or to owe you a favour. They may send some men.`) }, '📯 Ask for soldiers'));
+        if (!human && c.alive) acts.append(btn('', { onclick: async () => { if (await confirmBox({ title: 'Give soldiers?', icon: '⚔', text: `Send 100 of your men to ${r.name}? A grand gift: ${c.name} will remember it, and may ally with you or send men back one day.`, ok: 'Send them', cancel: 'Not now' })) this.action('giveTroops', r.id, 100); }, 'data-tip': tipHTML('Gift an army', 'Give 100 soldiers to this realm. A gift they will not forget.') }, '🎁 Give 100 soldiers'));
+        const wb = warBlock(s, this.map, r.id);
+        if (wb) acts.append(h('button.btn', { disabled: true, 'data-tip': tipHTML(isAlly ? 'Allies cannot be attacked' : 'Cannot declare war', esc(wb)) }, '⚔ Declare war'));
+        else acts.append(btn('', { onclick: () => this.declareWar(r), 'data-tip': tipHTML('Declare war', `${r.levies} of theirs against your ${playerRealm(s).levies}. You fight one battle a season.`) }, '⚔ Declare war'));
+        if (!isAlly && !human && neighborsOfRealm(s, this.map, s.playerRealm).includes(r.id)) acts.append(btn('', { onclick: () => this.action('tribute', r.id), 'data-tip': tipHTML('Demand tribute', 'Weaker neighbours may pay up. Strong or proud ones laugh at you. A good spymaster helps. Once per 6 seasons.') }, '🪙 Demand tribute'));
       }
     }
-    if (c.alive && c.realm === s.playerRealm && c.court) {
-      acts.append(c.imprisoned ? h('button.btn', { onclick: () => this.action('release', c.id), 'data-tip': tipHTML('Release', 'They will be grateful. Somewhat.') }, '🔓 Release')
-        : h('button.btn', { onclick: async () => { if (await confirmBox({ title: 'To the dungeon?', icon: '⛓', text: `Imprison ${c.name}? They will hate you for years, and the council will fear you.`, ok: 'Imprison', cancel: 'Mercy', danger: true })) this.action('imprison', c.id); }, 'data-tip': tipHTML('Imprison', 'Silence a troublemaker. Everyone notices.') }, '⛓ Imprison'));
+    if (c.alive && c.realm === s.playerRealm && c.id !== pl.id) {
+      if (c.court) acts.append(c.imprisoned ? btn('', { onclick: () => this.action('release', c.id), 'data-tip': tipHTML('Release', 'They will be grateful. Somewhat.') }, '🔓 Release')
+        : btn('', { onclick: async () => { if (await confirmBox({ title: 'To the dungeon?', icon: '⛓', text: `Imprison ${c.name}? They will hate you for years, and the council will fear you.`, ok: 'Imprison', cancel: 'Mercy', danger: true })) this.action('imprison', c.id); }, 'data-tip': tipHTML('Imprison', 'Silence a troublemaker. Everyone notices.') }, '⛓ Imprison'));
+      const eb = executeBlock(s, c);
+      acts.append(eb ? h('button.btn', { disabled: true, 'data-tip': tipHTML('Execute', esc(eb)) }, '🪓 Execute')
+        : btn('', { onclick: async () => { if (await confirmBox({ title: 'Execute?', icon: '🪓', text: `${c.name} will die, their family will never forgive you, and the court will fear you (−4 prestige, people unhappier).`, ok: 'Off with their head', cancel: 'Mercy', danger: true })) this.action('execute', c.id); }, 'data-tip': tipHTML('Execute', 'Final. Their relatives will hate you for generations.') }, '🪓 Execute'));
+      if (c.court && ['chancellor', 'marshal', 'steward', 'spymaster', 'priest', 'banker', 'jester'].includes(c.role)) acts.append(btn('', { onclick: async () => { if (await confirmBox({ title: 'Dismiss?', icon: '📜', text: `Take ${c.name}'s office away? A replacement is found next season.`, ok: 'Dismiss', cancel: 'Keep', danger: true })) this.action('dismiss', c.id); }, 'data-tip': tipHTML('Dismiss', 'Remove them from office. They will resent it.') }, '📜 Dismiss'));
+      acts.append(btn('', { onclick: async () => { if (await confirmBox({ title: 'Banish?', icon: '🚪', text: `Send ${c.name} out of your realm, to a neighbour?`, ok: 'Banish', cancel: 'Stay', danger: true })) this.action('banish', c.id); }, 'data-tip': tipHTML('Banish', 'Out of your court and into a neighbour’s. They will hold a grudge.') }, '🚪 Banish'));
     }
     body.append(h('div.section', null, h('h4', null, 'Actions'), acts));
 
     const proms = s.promises.filter(p => p.to === c.id);
     if (proms.length) body.append(h('div.section', null, h('h4', null, 'Promises you made'), proms.slice(-6).reverse().map(p => this.promiseEl(p))));
     body.append(this.familyEl(c));
+    body.append(this.relationsEl(c));
+    if (c.log && c.log.length) body.append(h('div.section', null, h('h4', null, 'Lately'), c.log.slice(-4).reverse().map(l => h('div.entry', null, h('span.y', null, l.y), this.link(l.t, [c.id])))));
     if (r && r.ruler === c.id) {
       const war = atWar(s, r.id, s.playerRealm);
       body.append(h('div.section', null, h('h4', null, `${r.kind} of ${r.name}`),
@@ -793,8 +877,8 @@ export class Game {
   renderSelf(body) {
     const s = this.state, pl = player(s), pr = playerRealm(s);
     body.append(h('div.row', { style: { gap: '4px', marginTop: '8px', flexWrap: 'wrap' } },
-      h('button.btn.small', { onclick: () => this.renameBox(), 'data-tip': tipHTML('Rename', 'Change your ruler’s name.') }, '✎ Rename'),
-      this.mp ? h('button.btn.small', { onclick: () => this.standInBox(), 'data-tip': tipHTML('Your stand-in', 'Auto replies while you are away, and what they should say.') }, '🗣 Stand-in: ' + ((this.mp.meta.auto || {}).on === false ? 'off' : 'on')) : null));
+      h('button.btn.small', { disabled: !!this.audience, onclick: () => this.renameBox(), 'data-tip': tipHTML('Rename', 'Change your ruler’s name.') }, '✎ Rename'),
+      this.mp ? h('button.btn.small', { disabled: !!this.audience, onclick: () => this.standInBox(), 'data-tip': tipHTML('Your stand-in', 'Auto replies while you are away, and what they should say.') }, '🗣 Stand-in: ' + ((this.mp.meta.auto || {}).on === false ? 'off' : 'on')) : null));
     const tabs = h('div.row', { style: { gap: '4px', marginTop: '10px' } },
       ['self', 'court'].map(t => h('button.btn.small' + (this.tab === t ? '.dark' : ''), { onclick: () => { this.tab = t; this.renderPanel(); }, 'data-tip': t === 'self' ? 'Your family, lands, wars and promises' : 'Your council and courtiers' }, t === 'self' ? 'Family & Realm' : 'Court & Council')));
     body.append(tabs);
@@ -806,8 +890,16 @@ export class Game {
       return;
     }
     body.append(this.familyEl(pl));
+    const lockSelf = !!this.audience;
+    const feastLeft = s.flags.lastFeast == null ? 0 : Math.max(0, 3 - (s.turn - s.flags.lastFeast));
+    body.append(h('div.section', null, h('h4', null, 'Rule the realm'),
+      h('div.row', { style: { gap: '4px', flexWrap: 'wrap', alignItems: 'center' } }, h('span.muted', null, 'Taxes '),
+        Object.entries(TAX).map(([k, t]) => h('button.btn.small' + (s.tax === k || (!s.tax && k === 'normal') ? '.dark' : ''), { disabled: lockSelf, onclick: () => this.action('tax', k), 'data-tip': tipHTML(`${t.label} taxes`, `Gold ×${t.mult}. People's mood ${t.mood >= 0 ? '+' : ''}${t.mood} a season.<br>${t.desc}`) }, t.label))),
+      h('div.row', { style: { gap: '4px', flexWrap: 'wrap', marginTop: '6px' } },
+        h('button.btn.small', { disabled: lockSelf || s.gold < 45 || feastLeft > 0, onclick: () => this.action('feast'), 'data-tip': tipHTML('Hold a feast (45 gold)', feastLeft ? `The kitchens need ${feastLeft} more season(s).` : '+6 prestige, the people cheer (+10 mood), and the court warms to you.') }, '🍖 Feast'),
+        h('button.btn.small', { disabled: lockSelf || s.gold < 40, onclick: () => this.action('hire'), 'data-tip': tipHTML('Hire mercenaries (40 gold)', '+120 men, up to a little over your usual maximum.') }, '🗡 Hire troops'))));
     body.append(h('div.section', null, h('h4', null, `${pr.kind} of ${pr.name}`),
-      h('div', null, `${provincesOf(s, pr.id).length} provinces · ${pr.levies}/${maxLevies(s, pr.id)} levies · income ${income(s)}/season`),
+      h('div', null, `${provincesOf(s, pr.id).length} provinces · ${pr.levies}/${maxLevies(s, pr.id)} levies · income ${income(s)}/season · people ${moodTier(s.mood == null ? 60 : s.mood).toLowerCase()}`),
       s.alliances.filter(a => a.includes(pr.id)).map(a => h('div', null, '🤝 Allied with ', s.realms[a[0] === pr.id ? a[1] : a[0]].name)),
       warsOf(s).map(w => h('div.war-mini', { onclick: () => openWar(this, w.id), 'data-tip': 'Click for the war' }, h('div', { style: { color: 'var(--red)' } }, `⚔ War with ${s.realms[w.attacker === pr.id ? w.defender : w.attacker].name}`), warBar(scoreFor(s, w), { small: true }))),
       h('button.btn.small', { style: { marginTop: '6px' }, onclick: () => this.goHome(), 'data-tip': tipHTML('Go home', 'Show your lands on the map.') }, '⌂ Show my lands')));
@@ -829,7 +921,21 @@ export class Game {
     if (c.parents) c.parents.forEach((id, i) => add(id, i === 0 ? 'Parent' : 'Parent'));
     if (c.spouse) add(c.spouse, 'Spouse');
     (c.children || []).forEach(id => add(id, s.chars[id].role === 'heir' ? 'Heir' : (s.chars[id].sex === 'm' ? 'Son' : 'Daughter')));
+    if (c.parents) for (const o of Object.values(s.chars)) if (o.id !== c.id && o.alive && o.parents && o.parents.some(p => c.parents.includes(p))) add(o.id, o.sex === 'm' ? 'Brother' : 'Sister');
     return rel.length ? h('div.section', null, h('h4', null, 'Family'), h('div.family', null, rel)) : h('div');
+  }
+  /** Friends, rivals and kin of this character, with how warmly they regard each other. */
+  relationsEl(c) {
+    const s = this.state;
+    const list = relationshipsOf(s, c).filter(x => x.c.alive || x.kin).slice(0, 10);
+    if (!list.length) return h('div');
+    return h('div.section', null, h('h4', { 'data-tip': tipHTML('Relationships', `How ${esc(c.name)} regards others (−100 to +100). Family starts warm; friendships and feuds form over time.`) }, 'Relationships'),
+      h('div.family', null, list.map(x => {
+        const m = this.medal(x.c, `${x.label} ${x.v > 0 ? '+' : ''}${x.v}`);
+        m.setAttribute('data-tip', tipHTML(`${esc(x.c.name)}: ${esc(x.label)}`, `${esc(c.name)} regards them at ${x.v > 0 ? '+' : ''}${x.v}.${x.kin && x.label !== x.kin ? ' ' + esc(x.kin) + '.' : ''}`));
+        if (x.v <= -25) m.classList.add('foe'); else if (x.v >= 25) m.classList.add('fond');
+        return m;
+      })));
   }
   medal(c, label) {
     const s = this.state;
@@ -844,9 +950,10 @@ export class Game {
       p.status === 'open' ? this.keepBtn(p) : null);
   }
   /** "Keep it now" for an open promise: pays the gold, declares the war, or honours it. */
-  keepBtn(p, after) {
+  keepBtn(p, after, opts) {
     const k = keepCost(this.state, this.map, p);
-    return h('button.btn.small.keep-btn', { disabled: !k.ok, 'data-tip': k.ok ? tipHTML('Keep your word now', 'No need to wait for the deadline.') : tipHTML('Not yet', esc(k.why || '')),
+    const lock = !!this.audience && !(opts && opts.inAudience);
+    return h('button.btn.small.keep-btn', { disabled: !k.ok || lock, 'data-tip': lock ? tipHTML('In an audience', 'Finish your audience first.') : k.ok ? tipHTML('Keep your word now', 'No need to wait for the deadline.') : tipHTML('Not yet', esc(k.why || '')),
       onclick: async e => { e.stopPropagation(); const r = await this.keepPromise(p); if (r && r.ok && after) after(); } }, '🤞 ' + k.label);
   }
   async keepPromise(p) {
@@ -890,7 +997,9 @@ export class Game {
       text: `${who.id === pl.id ? 'You' : who.name} and ${c.name}. About ${marriageChance(s, c, who)}% likely to accept.${c.realm !== s.playerRealm ? ` ${c.name} would join your court.` : ''}` });
     if (ok) await this.action('marry', c.id, who.id === pl.id ? null : who.id);
   }
-  giftAmount() { return Math.max(25, Math.min(100, Math.round(this.state.gold / 8 / 5) * 5)); }
+  giftAmount() { const g = this.state.gold; return g < 25 ? Math.max(5, Math.floor(g / 5) * 5) : Math.max(25, Math.min(100, Math.round(g / 8 / 5) * 5)); }
+  /** Gift sizes on offer: the usual one when you are flush, small ones when you are not, flowers always free. */
+  giftOptions() { const g = this.state.gold; return g >= 25 ? [this.giftAmount()] : [5, 10, 15, 20].filter(a => a <= g); }
   act(res) {
     if (res && res.msg) toast(res.msg, res.ok ? '✔' : '✖');
     if (this.state.flags.mapDirty) this.view.invalidate();

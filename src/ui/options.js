@@ -4,7 +4,7 @@ import { resetPositions } from './drag.js';
 import { applyVolumes, applyVoices } from '../audio.js';
 
 const KEY = 'rb-opts';
-const DEFAULTS = { textSize: 'm', sketchy: true, livePortraits: true, tutorialDone: false, name: '', musicVol: 0.45, sfxVol: 0.7, voices: true };
+const DEFAULTS = { textSize: 'm', font: 'readable', sketchy: true, livePortraits: true, tutorialDone: false, name: '', musicVol: 0.45, sfxVol: 0.7, voices: true };
 let opts = { ...DEFAULTS };
 try { Object.assign(opts, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch {}
 
@@ -18,6 +18,7 @@ export function setOpt(k, v) {
 export function applyOptions() {
   document.documentElement.style.setProperty('--fs', { s: '13.5px', m: '15px', l: '17px' }[opts.textSize] || '15px');
   document.body.classList.toggle('plain', !opts.sketchy);
+  document.body.classList.toggle('font-classic', opts.font === 'classic');
   applyVoices();
 }
 
@@ -32,6 +33,7 @@ export function openOptions(game) {
     h('div.titlebar', null, 'Options', h('button.x', { onclick: () => back.remove(), 'data-tip': 'Close' }, '✕')),
     h('div.body', null,
       h('div.opt-row', null, h('span.lbl', null, 'Text size'), seg('textSize', [['s', 'Small'], ['m', 'Medium'], ['l', 'Large']])),
+      h('div.opt-row', null, h('span.lbl', null, 'Font'), seg('font', [['readable', 'Readable'], ['classic', 'Old-fashioned']])),
       h('div.opt-row', null, h('span.lbl', null, 'Ink style'), seg('sketchy', [[true, 'Sketchy'], [false, 'Clean (faster)']])),
       h('div.opt-row', null, h('span.lbl', null, 'Portraits'), seg('livePortraits', [[true, 'Animated'], [false, 'Still']])),
       h('div.opt-row', null, h('span.lbl', null, 'Music'), seg('musicVol', [[0, 'Off'], [0.2, 'Low'], [0.45, 'Mid'], [0.75, 'High']])),

@@ -48,10 +48,28 @@ app.post('/api/save', (req, res) => {
   if (!pid) return res.status(400).json({ error: 'bad pid' });
   const prof = loadProfile(pid) || { pid, campaigns: [] };
   prof.save = req.body.state;
+  // every game keeps its own slot, so several can be on the go at once
+  const st = req.body.state || {};
+  if (st.slot) {
+    prof.saves = prof.saves || {};
+    prof.saves[st.slot] = st;
+    const keys = Object.keys(prof.saves).sort((a, b) => (prof.saves[b].lastPlayed || 0) - (prof.saves[a].lastPlayed || 0));
+    for (const k of keys.slice(8)) delete prof.saves[k];
+  }
   if (req.body.campaignSummary) {
     prof.campaigns = (prof.campaigns || []).filter(c => c.campaign !== req.body.campaignSummary.campaign).concat([req.body.campaignSummary]);
   }
   prof.updated = new Date().toISOString();
+  saveProfile(pid, prof);
+  res.json({ ok: true });
+});
+
+app.post('/api/save/delete', (req, res) => {
+  const pid = cleanPid(req.body.pid), slot = String(req.body.slot || '');
+  const prof = pid && loadProfile(pid);
+  if (!prof) return res.status(404).json({ error: 'nothing saved' });
+  if (prof.saves) delete prof.saves[slot];
+  if (prof.save && prof.save.slot === slot) prof.save = Object.values(prof.saves || {}).sort((a, b) => (b.lastPlayed || 0) - (a.lastPlayed || 0))[0] || null;
   saveProfile(pid, prof);
   res.json({ ok: true });
 });
@@ -165,12 +183,17 @@ WHO YOU ARE:
 - Realm: ${c.realm}. ${c.relationship.join(' ')}
 - Your feeling toward the ruler: ${c.opinion} on a scale of -100 (loathing) to +100 (adoration). Reasons: ${c.opinionReasons.join(', ') || 'none in particular'}.
 
-THE RULER BEFORE YOU: ${r.name} of House ${r.house}, age ${r.age}, ruling ${r.realm} since ${r.reignStart}. Treasury ${r.gold} gold, ${r.levies} soldiers, ${r.provinces} provinces.${r.wars.length ? ' At war with: ' + r.wars.join(', ') + '.' : ''}
+THE RULER BEFORE YOU: ${r.name} of House ${r.house}, ${r.sex === 'f' ? 'a WOMAN (she/her; address her as "Your Majesty", "Your Grace" or "my lady"; NEVER call her "man", "sir", "lord", "king" or "he")' : 'a MAN (he/him; "Your Majesty", "my lord", "sire")'}, age ${r.age}, ruling ${r.realm} since ${r.reignStart}. Treasury ${r.gold} gold, ${r.levies} soldiers, ${r.provinces} provinces. The people are ${r.mood || 'content'} (${r.tax || 'fair'} taxes).${r.wars.length ? ' At war with: ' + r.wars.join(', ') + '.' : ''}
+${r.omens && r.omens.length ? 'REAL OMENS RIGHT NOW (these genuinely affect the realm; you may mention them): ' + r.omens.join('; ') + '.' : 'There are NO omens or portents at present: never claim to have seen comets, signs or prophecies (a quirk about omens is just a quirk).'}
 Their reputation this reign: ${r.reputation.promisesKept} promises kept, ${r.reputation.promisesBroken} broken, ${r.reputation.insults} insults, ${r.reputation.wars} wars started.${r.previousRulers.length ? '\nPrevious rulers of this dynasty: ' + r.previousRulers.join('; ') + '.' : ''}
 
 WHAT YOU REMEMBER (real past events, oldest first; "cN" = campaign N. Bring these up NATURALLY when relevant: promises owed, broken promises, debts, insults, kindnesses. Deeds of earlier rulers belong to "your late father/mother/predecessor"; memories from earlier campaigns are old family tales):
 ${memories}
-${ctx.promises.length ? 'PROMISES THE RULER MADE YOU: ' + ctx.promises.join('; ') : ''}
+${c.relations && c.relations.length ? 'YOUR RELATIONSHIPS (regard −100..100; mention naturally, never as numbers): ' + c.relations.join(' | ') : ''}
+MONEY SCALE: gold is precious. 25 gold is a month's wages for a whole garrison, a real sum, never a 'pittance' or 'crumbs' unless you are a wealthy ruler being offered it as a bribe for something huge. Your own means: ${c.wealth || 'comfortable'}. A modest or comfortable person is moved by 25+ gold; even the wealthy respect 100+. React to the AMOUNT and to what it is for, not with reflex mockery.
+${c.lately && c.lately.length ? 'WHAT HAS HAPPENED TO YOU LATELY: ' + c.lately.join(' | ') : ''}
+${ctx.promises.length ? 'PROMISES THE RULER MADE YOU: ' + ctx.promises.join('; ') : 'THE RULER HAS MADE YOU NO PROMISES. If they ask what they promised, or you are tempted to claim a promise (tribute, gold, titles), there is none: say you recall no such promise.'}
+PROMISES AND DEMANDS ARE ONLY REAL IF LISTED ABOVE OR IN YOUR MEMORIES. Never invent a past promise, debt or tribute.
 ${ctx.openPromises && ctx.openPromises.length ? 'OPEN PROMISES (numbered): ' + ctx.openPromises.map(p => `#${p.n} "${p.text}"`).join('; ') : ''}
 ${mem.world.length ? 'GOSSIP FROM DISTANT LANDS (only mention if it fits): ' + mem.world.map(m => memLine(m.text).replace(/^\[Tales from afar\]\s*/, '')).join(' | ') : ''}
 
@@ -250,6 +273,7 @@ app.post('/api/audience/say', async (req, res) => {
     a.transcript.push({ role: 'assistant', content: JSON.stringify({ line: out.line }) });
     a.lines.push({ who: 'ruler', text: msg }, { who: 'them', text: out.line });
     const reply = sanitize(out);
+    reply.said = msg;
     if (reply.ends_audience) a.walked = a.aud.walked = true;
     let notes, opinion;
     if (a.world) {
@@ -275,7 +299,7 @@ app.post('/api/audience/end', async (req, res) => {
   if (!a || a.pid !== cleanPid(req.body.pid)) return res.status(404).json({ error: 'No such audience' });
   audiences.delete(req.body.id);
   if (a.world) {
-    try { withWorldPlayer(a.world.id, a.pid, (s, m) => finishAudience(s, m, s.chars[a.world.charId], a.aud)); } catch {}
+    try { withWorldPlayer(a.world.id, a.pid, (s, m) => finishAudience(s, m, s.chars[a.world.charId], a.aud)); } catch { }
   }
   if (a.msgs === 0) return res.json({ notes: [] });
   const c = a.ctx.char;
@@ -298,7 +322,7 @@ app.post('/api/audience/end', async (req, res) => {
           const me = Object.values(s.chars).find(x => x.alive && s.realms[x.realm] && s.realms[x.realm].ruler === x.id && s.realms[x.realm].name === a.ctx.ruler.realm);
           if (me) queueEvent(s, 'envoy_spoke', { a: me.id, notes: notes.join(' ') });
         });
-      } catch {}
+      } catch { }
     }
     await rememberMany(items);
     res.json({ notes, feeling: out.feeling });
@@ -376,4 +400,4 @@ if (fs.existsSync(dist)) {
 }
 
 const PORT = process.env.PORT || 8787;
-app.listen(PORT, () => console.log(`[royal-banter] api on :${PORT} · llm ${llmInfo().provider}/${llmInfo().model} · walrus memory ${memoryStats().enabled ? 'on' : 'OFF'}`));
+app.listen(PORT, () => console.log(`[royal-ramble] api on :${PORT} · llm ${llmInfo().provider}/${llmInfo().model} · walrus memory ${memoryStats().enabled ? 'on' : 'OFF'}`));

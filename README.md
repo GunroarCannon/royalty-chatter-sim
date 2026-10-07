@@ -14,7 +14,7 @@ Built for the Walrus Sessions hackathon *Chatbots That Remember*.
 
 ```bash
 git clone --recurse-submodules <this repo>
-cd royal-banter
+cd royal-chatter-sim
 npm install
 cp .env.example .env      # fill in GROQ_API_KEY, MEMWAL_ACCOUNT_ID, MEMWAL_PRIVATE_KEY
 npm run dev               # API on :8787, game on http://localhost:5180
@@ -24,7 +24,7 @@ Production: `npm run build && npm start` (the API serves `dist/` on `$PORT`; sav
 
 ### Deploying
 
-- **Docker:** `docker build -t royal-banter .` then `docker run -p 8080:8080 -v rbdata:/data --env-file .env royal-banter`.
+- **Docker:** `docker build -t royal-ramble .` then `docker run -p 8080:8080 -v rbdata:/data --env-file .env royal-ramble`.
 - **Render (free):** see *Free hosting* below.
 - **Fly.io:** `fly launch --no-deploy`, `fly volumes create data --size 1`, `fly secrets set GROQ_API_KEY=… MEMWAL_ACCOUNT_ID=… MEMWAL_PRIVATE_KEY=…`, `fly deploy`.
 
@@ -35,7 +35,7 @@ Shared worlds need a persistent disk, or the free Redis copy below; single-playe
 1. Push the repo to GitHub (the `public/portrait` submodule is public, Render clones it).
 2. **Upstash** ([upstash.com](https://upstash.com), sign in with GitHub): create a free Redis database and copy its **REST URL** and **REST token**.
 3. **Render** ([render.com](https://render.com)): **New → Blueprint**, pick the repo. It reads `render.yaml` (free plan). Fill in the secrets: `GROQ_API_KEY`, `MEMWAL_ACCOUNT_ID`, `MEMWAL_PRIVATE_KEY`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`.
-4. Share the `https://royal-banter-….onrender.com` link. Everyone who opens it plays in the same shared worlds.
+4. Share the `https://royal-ramble-….onrender.com` link. Everyone who opens it plays in the same shared worlds.
 
 Free-tier facts: the server sleeps after 15 minutes with nobody on it, and the first visit after that takes about a minute to wake it. Nothing is lost: worlds and profiles are copied to Redis (at most every 15 s per world, and on shutdown) and restored on wake. Walrus memories live on Walrus anyway.
 

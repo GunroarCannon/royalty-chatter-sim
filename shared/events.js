@@ -3,7 +3,7 @@
 // character and then returns to the event, so conversation is woven into play rather than spammed.
 import {
   player, playerRealm, council, record, addMod, fullName, shortName, roleLabel, opinionOf, neighborsOfRealm, atWar, allied,
-  provincesOf, ageOf, heirOf, livingCourt, forHuman, humanPid,
+  provincesOf, ageOf, heirOf, livingCourt, forHuman, humanPid, OMENS, addOmen, omensOf, moodTier, chaosMult, bumpBoth, maxLevies,
 } from './world.js';
 import { declareWar, battle, endWar, makePromise, keepPromise, breakPromise, kill, turnRng, foodOf } from './sim.js';
 import { roleTitle, preset } from './cultures.js';
@@ -44,7 +44,9 @@ export function drawEvents(state, map, rng) {
   const secs = state.mp && state.mp.seasonSecs;
   if (secs && secs < 120 && state.flags.lastDraw != null && (state.turn - state.flags.lastDraw) * secs < 120) return;
   state.flags.lastDraw = state.turn;
-  const n = !state.queue.length && rng.chance(0.3) ? 2 : 1;
+  const ch = chaosMult(state);
+  if (!rng.chance(Math.min(1, 0.5 + ch * 0.5))) return; // a calm world has quiet seasons
+  const n = 1 + (!state.queue.length && rng.chance(0.3 * ch) ? 1 : 0) + (ch > 1.3 && rng.chance(0.25) ? 1 : 0);
   for (let k = 0; k < n; k++) {
     const pool = [];
     for (const e of Object.values(E)) {
@@ -124,7 +126,7 @@ def('horses', {
 
 def('cheese', {
   title: s => `The ${F(s).Name} Incident`, icon: '🧀', weight: 1.2,
-  when: (s, m, rng) => { const b = council(s).steward || courtier(s, rng); const n = neighbourRuler(s, m, rng, r => !atWar(s, r, s.playerRealm)); return b && n && { a: b.id, b: n.a, realm: n.realm }; },
+  when: (s, m, rng) => { const b = council(s).steward || courtier(s, rng); const n = neighbourRuler(s, m, rng, r => !atWar(s, r, s.playerRealm) && !allied(s, r, s.playerRealm)); return b && n && { a: b.id, b: n.a, realm: n.realm }; },
   text: (s, m, { a, b, realm }) => `${C(s, a).name} bursts in: an entire cart of royal ${F(s).name} has vanished at the border, and the tracks lead straight to ${s.realms[realm].name}. ${fullName(s, C(s, b))} denies everything, though ${his(C(s, b))} court has been suspiciously well-fed.`,
   options: (s, m, { a, b, realm }) => [
     { key: 'demand', label: `Demand reparations from ${C(s, b).name}`, tip: '+30 gold if they pay, else bad blood', run: (s2, m2, c, rng) => { s2.stats.cheese++; const o = opinionOf(s2, C(s2, b)).total; if (o > 0 || rng.chance(0.4)) { gold(s2, 30); addMod(C(s2, b), 'Accused of cheese theft', -10, 12); record(s2, `${fullName(s2, C(s2, b))} paid 30 gold in ${F(s2).name} reparations to ${fullName(s2, P(s2))}.`, { kind: 'cheese', chars: [b, a] }); return 'They pay up, grumbling about "${F(s2).name} tyranny".'; } addMod(C(s2, b), 'Accused of cheese theft', -25, 20); record(s2, `${fullName(s2, P(s2))} accused ${fullName(s2, C(s2, b))} of stealing a cart of ${F(s2).name}. ${C(s2, b).name} refused to pay and is furious.`, { kind: 'cheese', chars: [b, a], world: `A great ${F(s2).Name} Dispute has erupted between ${s2.realms[s2.playerRealm].name} and ${s2.realms[realm].name}.` }); return `${C(s2, b).name} refuses and calls you a "${F(s2).insult}".`; } },
@@ -483,6 +485,67 @@ def('bankrupt', {
   options: s => [
     { key: 'ok', label: 'Oh dear', run: s2 => { s2.realms[s2.playerRealm].levies = Math.round(s2.realms[s2.playerRealm].levies * 0.6); pr(s2, -15); s2.stats.broke = 1; return 'Some soldiers wander off.'; } },
   ],
+});
+
+
+// --------------------------------------------------------------- omens, moods, and news from the court
+def('omen', {
+  title: 'A Portent!', icon: '🔮', weight: 0.8, cooldown: 12,
+  when: (s, m, rng) => { const pr = council(s).priest || courtier(s, rng); if (!pr || omensOf(s).length >= 2) return null; return { a: pr.id, omen: rng.pick(Object.keys(OMENS)) }; },
+  text: (s, m, { a, omen }) => `${C(s, a).name} bursts in, wide-eyed: "${OMENS[omen].label}, Majesty! It must mean something." (${OMENS[omen].desc})`,
+  options: (s, m, { a, omen }) => {
+    const O = OMENS[omen], good = O.good;
+    const done = (s2, extra, secs, msg) => { if (extra) gold(s2, -extra); addOmen(s2, omen, secs); record(s2, `${O.label}. ${C(s2, a).name} read it as ${good ? 'a blessing' : 'a warning'}.`, { kind: 'omen', chars: [a], mem: false }); return msg; };
+    return [
+      good
+        ? { key: 'feast', label: 'Celebrate the sign (−20 gold)', tip: 'The blessing lasts longer', disabled: s.gold < 20, run: s2 => done(s2, 20, 7, 'Banners, bells and a very large pie. The omen is honoured.') }
+        : { key: 'offer', label: 'Make offerings (−25 gold)', tip: 'The ill luck passes quickly', disabled: s.gold < 25, run: s2 => { addMod(C(s2, a), 'Heeded my warning', 10, 10); return done(s2, 25, 2, 'Candles are lit. The gloom lifts sooner.'); } },
+      { key: 'shrug', label: '"Superstition!"', tip: 'It happens anyway', run: s2 => done(s2, 0, 4, good ? 'You wave it off. The sign appears not to mind.' : 'You wave it off. The ravens, however, are already packing.') },
+      { key: 'talk', label: `Ask ${C(s, a).name} what it means`, talk: a },
+    ];
+  },
+});
+
+def('unrest', {
+  title: 'The People Are Restless', icon: '🔥', weight: 3, cooldown: 5,
+  when: s => (s.mood != null && s.mood < 25 ? {} : null),
+  text: s => `Pitchforks glint outside the gates. The chant is something about ${s.tax === 'high' || s.tax === 'crushing' ? 'taxes, mostly, and also a rude word for you' : 'bread, taxes and your hat'}. Mood: ${moodTier(s.mood)}.`,
+  options: s => [
+    { key: 'ease', label: 'Lower the taxes', tip: 'Taxes become Light; the people calm (+14)', run: s2 => { s2.tax = 'low'; s2.mood = Math.min(100, s2.mood + 14); record(s2, `${fullName(s2, P(s2))} lowered the taxes after riots at the gates.`, { kind: 'deed' }); return 'The crowd cheers. The treasurer weeps quietly.'; } },
+    { key: 'bread', label: 'Bread and circuses (−40 gold)', tip: 'Mood +12, prestige +2', disabled: s.gold < 40, run: s2 => { gold(s2, -40); s2.mood = Math.min(100, s2.mood + 12); pr(s2, 2); return 'A juggler, three bears and free pies. Order returns.'; } },
+    { key: 'crush', label: 'Send in the soldiers', tip: 'Mood +4 (fear), −8% levies, −6 prestige', run: s2 => { s2.mood = Math.min(100, s2.mood + 4); pr(s2, -6); s2.stats.insults++; const r = s2.realms[s2.playerRealm]; r.levies = Math.round(r.levies * 0.92); record(s2, `${fullName(s2, P(s2))} sent soldiers against restless peasants.`, { kind: 'deed' }); return 'Silence falls. It is not a happy silence.'; } },
+  ],
+});
+
+def('festival', {
+  title: 'A Spontaneous Festival', icon: '🎉', weight: 2, cooldown: 8,
+  when: s => (s.mood != null && s.mood >= 82 ? {} : null),
+  text: s => `The people are so content that someone has started a festival in your honour. There is dancing. There is a man wearing a cheese. Mood: ${moodTier(s.mood)}.`,
+  options: s => [
+    { key: 'join', label: 'Join the dancing (+6 prestige)', run: s2 => { pr(s2, 6); s2.stats.feasts++; return 'You are seen dancing. The court will talk about it for years.'; } },
+    { key: 'tips', label: 'Collect a festival levy (+35 gold)', tip: 'The happy people pay gladly (mood −4)', run: s2 => { gold(s2, 35); s2.mood = Math.max(0, s2.mood - 4); return 'Coins rain into your cap.'; } },
+    { key: 'raise', label: 'Recruit the volunteers (+120 men)', tip: 'Mood −3', run: s2 => { const r = s2.realms[s2.playerRealm]; r.levies = Math.min(maxLevies(s2, r.id) * 1.2, r.levies + 120); s2.mood = Math.max(0, s2.mood - 3); return 'Half the festival marches off, still singing.'; } },
+  ],
+});
+
+const NEWS_TITLES = { wedding: 'A Wedding at Court', romance: 'Whispers of Romance', feud: 'A Feud Brews', duel: 'Swords at Dawn', ill: 'Illness in the Household', talent: 'A Feat Worth Noting', scandal: 'A Scandal!', friends: 'New Friends' };
+def('court_news', {
+  title: (s, m, { kind }) => NEWS_TITLES[kind] || 'News from the Court', icon: '🗞', auto: 'ok',
+  text: (s, m, { text }) => text,
+  options: (s, m, { a, b, kind }) => {
+    const A = C(s, a), B = b && C(s, b);
+    const ok = { key: 'ok', label: 'Noted.' };
+    if (!A || !A.alive) return [ok];
+    const opts = [];
+    if (kind === 'wedding' || kind === 'romance') opts.push({ key: 'gift', label: 'Send a gift (−15 gold)', disabled: s.gold < 15, run: s2 => { gold(s2, -15); addMod(C(s2, a), 'Sent a gift', 12, 12, 'gift'); if (B) addMod(C(s2, b), 'Sent a gift', 12, 12, 'gift'); return 'A silver spoon, wrapped in cheerful linen.'; } });
+    else if (kind === 'feud' || kind === 'duel') opts.push({ key: 'mediate', label: 'Make them shake hands', tip: 'They like each other more, and you a little', run: s2 => { if (B) bumpBoth(C(s2, a), C(s2, b), 25); addMod(C(s2, a), 'Made peace', 6, 8); if (B) addMod(C(s2, b), 'Made peace', 6, 8); return 'They shake hands. Both squeeze very hard.'; } });
+    else if (kind === 'ill') opts.push({ key: 'doctor', label: 'Send your physician (−15 gold)', disabled: s.gold < 15, run: s2 => { gold(s2, -15); addMod(C(s2, a), 'Sent a physician', 15, 14, 'gift'); return `${A.name} recovers, mostly out of gratitude.`; } });
+    else if (kind === 'talent') opts.push({ key: 'praise', label: `Reward ${A.name} (−20 gold)`, disabled: s.gold < 20, run: s2 => { gold(s2, -20); addMod(C(s2, a), 'Rewarded my feat', 15, 14, 'gift'); return `${A.name} glows.`; } });
+    else if (kind === 'scandal') opts.push({ key: 'laugh', label: 'Laugh it off (+2 prestige)', run: s2 => { pr(s2, 2); addMod(C(s2, a), 'Laughed at my scandal', -4, 6); return 'Everyone is relieved you have a sense of humour.'; } });
+    opts.push(ok);
+    opts.push({ key: 'talk', label: `Talk to ${A.name}`, talk: a });
+    return opts;
+  },
 });
 
 export const EVENTS = E;

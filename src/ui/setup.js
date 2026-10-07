@@ -4,7 +4,7 @@ import { PRESETS } from '../../shared/cultures.js';
 import { createWorld, DIFFICULTY, fullName, player, playerRealm } from '../../shared/world.js';
 import { generateMap } from '../../shared/mapgen.js';
 import { renderMapLayer } from '../map/MapView.js';
-import { h } from './dom.js';
+import { h, tipHTML } from './dom.js';
 
 const randSeed = () => 'w' + Math.floor(Math.random() * 1e9).toString(36);
 
@@ -17,6 +17,7 @@ export function openSetup(game, { prev, onStart, onCancel }) {
     difficulty: (prev && prev.settings && prev.settings.difficulty) || 'normal',
     realms: 'normal',
     shareWorld: true,
+    entropy: (prev && prev.settings && prev.settings.entropy != null) ? prev.settings.entropy : 35,
   };
   let built = null, timer = 0;
   const maps = new Map();
@@ -28,9 +29,9 @@ export function openSetup(game, { prev, onStart, onCancel }) {
 
   const worldOpts = () => {
     if (cfg.mode === 'continue') {
-      return { seed: prev.seed, preset: prev.preset || 'world', campaign: (prev.campaign || 1) + 1, year: prev.year + 22, settings: Object.assign({}, prev.settings || {}, { difficulty: cfg.difficulty, shareWorld: cfg.shareWorld }) };
+      return { seed: prev.seed, preset: prev.preset || 'world', campaign: (prev.campaign || 1) + 1, year: prev.year + 22, settings: Object.assign({}, prev.settings || {}, { difficulty: cfg.difficulty, shareWorld: cfg.shareWorld, entropy: cfg.entropy }) };
     }
-    return { seed: cfg.seed, preset: cfg.preset, campaign: 1, settings: { difficulty: cfg.difficulty, realms: cfg.realms, shareWorld: cfg.shareWorld } };
+    return { seed: cfg.seed, preset: cfg.preset, campaign: 1, settings: { difficulty: cfg.difficulty, realms: cfg.realms, shareWorld: cfg.shareWorld, entropy: cfg.entropy } };
   };
   function rebuild() {
     clearTimeout(timer);
@@ -97,6 +98,10 @@ export function openSetup(game, { prev, onStart, onCancel }) {
     }
     left.append(
       h('div.opt-row', { style: { marginTop: '12px' } }, h('span.lbl', null, 'Difficulty'), seg('difficulty', Object.entries(DIFFICULTY).map(([k, d]) => [k, d.label, d.desc]))),
+      h('div.opt-row', { 'data-tip': tipHTML('Chaos', 'Low: quiet courts, few surprises.<br>High: more weddings, feuds, duels, wars and omens, and bigger ones.') },
+        h('span.lbl', null, 'Chaos'), h('span.muted', null, 'Calm'),
+        h('input', { type: 'range', min: 0, max: 100, step: 5, value: cfg.entropy, style: { flex: 1, minWidth: 0 }, oninput: e => { cfg.entropy = +e.target.value; } }),
+        h('span.muted', null, 'Wild')),
       cfg.mode === 'new' ? h('div.opt-row', null, h('span.lbl', null, 'Realms'), seg('realms', [['few', 'Few & large'], ['normal', 'Normal'], ['many', 'Many & small']])) : null,
       cfg.mode === 'new' ? h('div.opt-row', null, h('span.lbl', null, 'Seed'), seedIn, h('button.btn.small', { 'data-tip': 'Roll a new world', onclick: () => { cfg.seed = randSeed(); seedIn.value = cfg.seed; rebuild(); } }, '🎲 Reroll')) : null,
       h('div.opt-row', null, h('span.lbl', null, 'Tales'), h('label.check', null, h('input', { type: 'checkbox', checked: cfg.shareWorld, onchange: e => { cfg.shareWorld = e.target.checked; } }), 'Share my deeds with other players')),
@@ -111,6 +116,7 @@ export function openSetup(game, { prev, onStart, onCancel }) {
       h('div.setup-right', null, preview, youRule,
         h('button.btn.dark', { style: { textAlign: 'center', fontFamily: 'var(--sc)', fontSize: '19px', padding: '12px' }, onclick: () => {
           if (!built) return;
+          built.state.settings.entropy = cfg.entropy; // the slider moves without redrawing the map
           back.remove();
           onStart(built);
         } }, '👑 Take the throne'))),

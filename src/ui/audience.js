@@ -6,6 +6,7 @@ import { liveActor, moodExpr, stillURL } from '../portraits.js';
 import { api } from '../api.js';
 import { h, esc, toast, opinionBadge, tipHTML, typingDots } from './dom.js';
 import { sfx } from '../audio.js';
+import { relationOf } from './links.js';
 
 export const sexMark = c => h('span.sex.' + (c.sex === 'f' ? 'f' : 'm'), { 'data-tip': c.sex === 'f' ? 'Woman' : 'Man' }, c.sex === 'f' ? '♀' : '♂');
 import { draggable } from './drag.js';
@@ -31,6 +32,10 @@ export function openAudience(game, c, { reason, free, onClose }) {
   aud.fate = mp ? null : disposition(s, c, seed);
   const ctx = mp ? null : audienceContext(s, game.map, c);
   let liveOp = op0;
+  game.audience = { id: c.id };
+  document.body.classList.add('aud-open');
+  game.noteRecent(c.id, 'talk');
+  setTimeout(() => game.renderPanel && game.renderPanel(), 0);
 
   const log = h('div.log');
   const mems = h('div.memories');
@@ -40,6 +45,24 @@ export function openAudience(game, c, { reason, free, onClose }) {
   const opEl = h('span');
   const chips = h('div.chips', null, CHIPS.map(([label, text]) => h('span.chip', { 'data-tip': tipHTML(label.slice(2).trim(), CHIP_TIPS[label.slice(2).trim()] || ''), onclick: () => { input.value = text; input.focus(); input.setSelectionRange(text.length, text.length); } }, label)));
   const speech = h('div.speech');
+  // paying them in person: what you owe them, or a purse of gold. The character is told so they can react.
+  const pay = h('div.pay-row');
+  const paid = text => {
+    renderPay(); updateOp(); game.refresh();
+    if (!aud.over && aud.id && !input.disabled) { input.value = text; send(); }
+  };
+  const renderPay = () => {
+    pay.innerHTML = '';
+    if (aud.over) return;
+    for (const p of s.promises.filter(p => p.to === c.id && p.status === 'open')) {
+      if (p.kind === 'gold' || p.kind === 'vague') pay.append(game.keepBtn(p, () => paid(`I have kept my word: ${p.text}. It is done.`), { inAudience: true }));
+    }
+    for (const n of game.state.gold >= 25 ? [25, 50, 100] : game.giftOptions()) {
+      pay.append(h('button.btn.small', { disabled: s.gold < n, 'data-tip': tipHTML(`Give ${n} gold`, s.gold < n ? 'Your purse is too light.' : `Hand ${esc(c.name)} ${n} gold now. They will like you more.`),
+        onclick: async () => { const res = await game.action('gift', c.id, n); if (res && res.ok !== false) { if (mp) liveOp += 3; paid(`I hand you ${n} gold.`); } } }, `💰 ${n}`));
+    }
+    if (s.gold < 25) pay.append(h('button.btn.small', { 'data-tip': tipHTML('Wild flowers', 'Free. A small token of goodwill.'), onclick: async () => { const res = await game.action('flowers', c.id); if (res && res.ok) paid('I give you a bunch of wild flowers.'); } }, '🌼 Flowers'));
+  };
   const say = h('div.say', null, input, sendBtn);
   // while they think, the input is locked: say so, with dots, so nobody wonders why they cannot type
   const waiting = (on, what) => {
@@ -50,12 +73,12 @@ export function openAudience(game, c, { reason, free, onClose }) {
 
   const addLine = (who, text, cls = '') => {
     const el = h('div.line.' + (who === 'ruler' ? 'ruler' : who === 'sys' ? 'sys' : 'them') + (cls ? '.' + cls : ''), null,
-      who === 'sys' ? null : h('span.who', null, who === 'ruler' ? player(s).name + ':' : c.name + ':'), who === 'ruler' ? text : game.link(text, [c.id]));
+      who === 'sys' ? null : h('span.who', null, who === 'ruler' ? player(s).name + ' (you):' : c.name + ':'), who === 'ruler' ? text : game.link(text, [c.id]));
     log.append(el); log.scrollTop = log.scrollHeight;
     return el;
   };
   const addMem = (m, fresh) => {
-    mems.append(h('div.mem' + (fresh ? '.fresh' : ''), { 'data-tip': m.source === 'pending' ? 'Just written; Walrus is still indexing it.' : 'Recalled from Walrus Memory' }, m.text.replace(/^\[[^\]]*\]\s*(\[[^\]]*\]\s*)?/, '')));
+    mems.append(h('div.mem' + (fresh ? '.fresh' : ''), { 'data-tip': m.source === 'pending' ? 'Just written; Walrus is still indexing it.' : 'Recalled from Walrus Memory' }, game.link(m.text.replace(/^\[[^\]]*\]\s*(\[[^\]]*\]\s*)?/, ''), [c.id])));
   };
   const updateOp = () => { opEl.innerHTML = ''; opEl.append('Opinion of you: ', opinionBadge(mp ? liveOp : opinionOf(s, c).total)); };
   // their patience as little candles; they may still leave early if bored or insulted
@@ -79,6 +102,7 @@ export function openAudience(game, c, { reason, free, onClose }) {
     live.actor.say(r.line);
   };
   const effects = (r, serverNotes) => {
+    if (!mp) setTimeout(() => game.save(), 0);
     const notes = mp ? (serverNotes || []) : applyExchange(s, c, aud, r);
     for (const n of notes) addLine('sys', n);
     if (r.opinion_delta >= 4) addLine('sys', `${c.name} warms to you.`);
@@ -93,7 +117,9 @@ export function openAudience(game, c, { reason, free, onClose }) {
     input.disabled = true; sendBtn.disabled = true;
     if (!mp) finishAudience(s, game.map, c, aud);
     live.stop(); back.remove();
-    const done = () => onClose && onClose();
+    game.audience = null; document.body.classList.remove('aud-open');
+    setTimeout(() => { game.refresh(); game.renderPanel && game.renderPanel(); }, 0);
+    const done = () => onClose && onClose(aud.said);
     if (aud.id && aud.said) memoryNote(game, c, api.audienceEnd(aud.id), done);
     else { if (aud.id) api.audienceEnd(aud.id).catch(() => {}); done(); }
   };
@@ -114,6 +140,7 @@ export function openAudience(game, c, { reason, free, onClose }) {
       addLine('them', r.reply.line);
       perform(r.reply);
       if (r.opinion != null) liveOp = r.opinion;
+      r.reply.said = msg;
       effects(r.reply, r.notes);
       aud.left = r.left;
       if (r.reply.ends_audience && r.left > 0) walkOut();
@@ -132,7 +159,7 @@ export function openAudience(game, c, { reason, free, onClose }) {
     waiting(false);
     updateLeft();
     if (!aud.over) { input.disabled = false; sendBtn.disabled = false; input.focus(); }
-    else { chips.style.display = 'none'; sendBtn.textContent = 'Speak'; endBtn.classList.add('pulse'); }
+    else { chips.style.display = 'none'; pay.style.display = 'none'; sendBtn.textContent = 'Speak'; endBtn.classList.add('pulse'); }
   };
   sendBtn.onclick = send;
   input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); if (e.key === 'Escape') end(); });
@@ -143,21 +170,22 @@ export function openAudience(game, c, { reason, free, onClose }) {
     h('div.aud-body', null,
       h('div.aud-left', null,
         h('div.aud-portrait', null, live.el, speech),
-        h('div.aud-info', null, h('div.sc', { style: { fontSize: '18px' } }, fullName(s, c), ' ', sexMark(c)), h('div.muted', { style: { fontSize: '13px' } }, roleLabel(s, c)), opEl,
+        h('div.aud-info', null, h('div.sc', { style: { fontSize: '18px' } }, fullName(s, c), ' ', sexMark(c)), h('div.muted', { style: { fontSize: '13px' } }, roleLabel(s, c)), h('div.rel-line', null, relationOf(game, c).join(' · ')), opEl,
           h('div.traits', null, c.traits.map(t => h('span.trait', { 'data-tip': esc(TRAITS[t].persona) }, TRAITS[t].icon + ' ' + TRAITS[t].label)))),
         h('div.aud-mems', null, h('div.mem-h', null, 'What they remember'), mems)),
-      h('div.aud-right', null, log, chips, say,
+      h('div.aud-right', null, log, chips, pay, say,
         h('div.aud-foot', null, leftEl, endBtn))),
   ));
   document.body.append(back);
   draggable(back.firstChild, { handle: back.firstChild.querySelector('.titlebar') });
   updateOp();
-  const opening = addTyping();
+  let opening = addTyping();
   waiting(true, `${c.name} is recalling what they know of you…`);
   leftEl.textContent = 'Recalling memories from Walrus…';
   sfx('drop');
 
-  api.audienceStart(ctx, aud.fate, reason, mp ? { worldId: mp.id, charId: c.id, free: !!free } : null).then(r => {
+  let tries = 0;
+  const begin = () => api.audienceStart(ctx, aud.fate, reason, mp ? { worldId: mp.id, charId: c.id, free: !!free } : null).then(r => {
     if (r.opinion != null) { liveOp = r.opinion; updateOp(); }
     aud.id = r.id; aud.left = r.limit;
     opening.remove();
@@ -168,16 +196,19 @@ export function openAudience(game, c, { reason, free, onClose }) {
     perform(r.reply);
     if (r.reply.ends_audience) { walkOut(); aud.over = true; chips.style.display = 'none'; endBtn.classList.add('pulse'); updateLeft(); return; }
     input.disabled = false; sendBtn.disabled = false; input.focus();
-    updateLeft();
+    updateLeft(); renderPay();
   }).catch(e => {
+    // a dropped connection: try once more by itself, then offer a button (nothing was said, so no bell is spent)
+    if (!ended && tries++ < 1 && !(e.status >= 400 && e.status < 500)) { waiting(true, `${c.name} is gathering their thoughts…`); return void setTimeout(begin, 1500); }
     opening.remove();
     waiting(false);
     input.placeholder = '';
-    endBtn.classList.add('pulse');
-    addLine('sys', e.message || 'They seem unable to speak right now.', 'bad');
+    const retry = h('button.btn.small.dark', { onclick: () => { retry.remove(); tries = 0; opening = addTyping(); waiting(true, `${c.name} is recalling what they know of you…`); begin(); } }, '↻ Try again');
+    addLine('sys', (e.message || 'They seem unable to speak right now.') + ' Your bell is not spent if you leave now.', 'bad');
+    log.append(retry); log.scrollTop = log.scrollHeight;
     leftEl.textContent = '';
-    aud.over = true;
   });
+  begin();
 }
 
 /** After an audience: what the character will remember, as a note that stays until you close it. */
@@ -198,7 +229,7 @@ function memoryNote(game, c, pending, done) {
   pending.then(r => {
     list.innerHTML = '';
     const notes = (r && r.notes) || [];
-    if (notes.length) { notes.forEach(n => list.append(h('div.mem.fresh', null, n))); sfx('snap'); }
+    if (notes.length) { notes.forEach(n => list.append(h('div.mem.fresh', null, game.link(n, [c.id])))); sfx('snap'); }
     else list.append(h('div.muted', null, 'Nothing worth remembering, it seems.'));
   }).catch(() => { list.innerHTML = ''; list.append(h('div.muted', null, 'The scribe dropped the quill. (Memory is unavailable.)')); });
 }

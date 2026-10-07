@@ -74,14 +74,16 @@ export const linkText = (text, ids) => (linkifier ? linkifier(String(text), ids)
 const toasts = h('div.toasts');
 document.body.append(toasts);
 const TOAST_KIND = { '💰': 'gold', '⚔': 'war', '🏳': 'war', '💥': 'war', '✝': 'grey', '👑': 'gold', '🤝': 'good', '💍': 'good', '✔': 'good', '✖': 'bad', '🕊': 'good' };
-export function toast(text, icon = '📜', ms = 4200, ids) {
+export function toast(text, icon = '📜', ms, ids) {
+  if (!ms) ms = Math.max(2600, Math.min(4800, 1800 + String(text).length * 32)); // short news goes quickly; click a toast to dismiss it
   const t = h('div.toast.' + (TOAST_KIND[icon] || 'plain'), null, h('span.toast-icon', null, icon), h('span', null, linkText(text, ids)));
   toasts.append(t);
   while (toasts.children.length > 5) toasts.firstChild.remove();
   let timer = setTimeout(out, ms);
   function out() { t.classList.add('out'); setTimeout(() => t.remove(), 600); }
+  t.addEventListener('click', () => { clearTimeout(timer); out(); });
   t.addEventListener('mouseenter', () => clearTimeout(timer));
-  t.addEventListener('mouseleave', () => { timer = setTimeout(out, 1500); });
+  t.addEventListener('mouseleave', () => { timer = setTimeout(out, 1000); });
 }
 
 /** A number that rises and fades from an element: "+40" in green, "-25" in red. */
